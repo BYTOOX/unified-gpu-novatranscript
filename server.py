@@ -78,6 +78,18 @@ if not hasattr(torchaudio, 'AudioMetaData'):
                 self.bits_per_sample = bits_per_sample
                 self.encoding = encoding
         torchaudio.AudioMetaData = AudioMetaData
+
+# Patch 5: Forcer le backend soundfile au lieu de torchcodec (non installé)
+# torchaudio >= 2.5 utilise torchcodec par défaut qui n'est pas dispo sur ROCm
+_original_torchaudio_load = torchaudio.load
+
+def _patched_torchaudio_load(filepath, *args, **kwargs):
+    # Forcer le backend soundfile si non spécifié
+    if 'backend' not in kwargs:
+        kwargs['backend'] = 'soundfile'
+    return _original_torchaudio_load(filepath, *args, **kwargs)
+
+torchaudio.load = _patched_torchaudio_load
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
