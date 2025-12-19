@@ -136,6 +136,28 @@ Dans le panneau admin :
 | Pyannote 3.1 | ~5x temps réel |
 | Total (10 min audio) | ~2-3 min |
 
+## Configuration avancée
+
+### Variable `PYANNOTE_DEVICE`
+
+Contrôle le device utilisé pour Pyannote (indépendamment de Whisper qui utilise toujours le GPU si disponible).
+
+| Valeur | Description |
+|--------|-------------|
+| `auto` | (défaut) GPU si disponible, fallback CPU automatique pour GPUs AMD RDNA 3.5 |
+| `cpu` | Force l'utilisation du CPU |
+| `cuda` | Force l'utilisation du GPU |
+
+Configurable via le fichier `.env` :
+```bash
+PYANNOTE_DEVICE=cpu
+```
+
+Ou en ligne de commande :
+```bash
+PYANNOTE_DEVICE=cpu ./start-server.sh
+```
+
 ## Dépannage
 
 ### "No GPU available"
@@ -146,6 +168,20 @@ ls -la /dev/dri /dev/kfd
 # Vérifier que l'utilisateur est dans le groupe video
 groups | grep video
 ```
+
+### "miopenStatusUnknownError" ou erreurs MIOpen
+Ce problème survient sur certains GPUs AMD récents (RDNA 3.5 : Radeon 8060S, 8050S, etc.) où MIOpen ne supporte pas encore toutes les opérations.
+
+**Solution :** Forcer Pyannote sur CPU :
+```bash
+# Dans .env
+PYANNOTE_DEVICE=cpu
+
+# Ou en ligne de commande
+PYANNOTE_DEVICE=cpu ./start-server.sh
+```
+
+Whisper continuera à utiliser le GPU, seul Pyannote utilisera le CPU.
 
 ### "Failed to load Pyannote"
 - Vérifiez que le token HF est valide

@@ -139,6 +139,9 @@ UPLOAD_DIR = Path("/tmp/uploads")
 WHISPER_MODEL_ID = "openai/whisper-large-v3-turbo"
 PYANNOTE_MODEL_ID = "pyannote/speaker-diarization-3.1"
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
+# Device pour Pyannote: "auto" (GPU avec fallback CPU), "cpu", ou "cuda"
+# Utile pour les GPUs AMD récents (RDNA 3.5) où MIOpen peut avoir des problèmes
+PYANNOTE_DEVICE = os.environ.get("PYANNOTE_DEVICE", "auto")
 
 # Modèles globaux (chargés une seule fois au démarrage)
 whisper_model = None
@@ -267,11 +270,56 @@ def load_pyannote_model(hf_token: str):
         use_auth_token=hf_token
     )
     
-    if torch.cuda.is_available():
+    # Déterminer le device pour Pyannote
+    pyannote_device = _get_pyannote_device()
+    if pyannote_device == "cuda":
         pyannote_pipeline.to(torch.device("cuda"))
+        logger.info("Pyannote chargé sur GPU (CUDA)")
+    else:
+        pyannote_pipeline.to(torch.device("cpu"))
+        logger.info("Pyannote chargé sur CPU")
     
     hf_token_loaded = hf_token
-    logger.info("Pyannote chargé avec succès")
+
+
+def _get_pyannote_device() -> str:
+    """
+    Détermine le device à utiliser pour Pyannote.
+    
+    Returns:
+        "cuda" ou "cpu"
+    """
+    if PYANNOTE_DEVICE.lower() == "cpu":
+        return "cpu"
+    
+    if PYANNOTE_DEVICE.lower() == "cuda":
+        if torch.cuda.is_available():
+            return "cuda"
+        else:
+            logger.warning("PYANNOTE_DEVICE=cuda mais pas de GPU disponible, utilisation du CPU")
+            return "cpu"
+    
+    # Mode "auto": essayer GPU, fallback sur CPU si erreur connue
+    if torch.cuda.is_available():
+        # Sur les GPUs AMD récents (RDNA 3.5), MIOpen peut avoir des problèmes
+        # avec certaines opérations (InstanceNorm dans SincNet)
+        # On tente quand même le GPU, l'erreur sera gérée à l'exécution
+        if detect_rocm():
+            # Pour ROCm, vérifier si c'est un GPU potentiellement problématique
+            try:
+                gpu_name = torch.cuda.get_device_name(0).lower()
+                # GPUs RDNA 3.5 (Strix Point) connus pour avoir des problèmes
+                problematic_gpus = ["8060", "8050", "8040", "strix"]
+                if any(prob in gpu_name for prob in problematic_gpus):
+                    logger.warning(f"GPU {torch.cuda.get_device_name(0)} détecté - "
+                                   "MIOpen peut avoir des problèmes avec Pyannote")
+                    logger.warning("Utilisation du CPU pour Pyannote (définir PYANNOTE_DEVICE=cuda pour forcer le GPU)")
+                    return "cpu"
+            except Exception:
+                pass
+        return "cuda"
+    
+    return "cpu"
 
 
 def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
@@ -343,7 +391,18 @@ def diarize_audio(audio_path: str, min_speakers: Optional[int] = None,
     if max_speakers:
         params["max_speakers"] = max_speakers
     
-    diarization = pyannote_pipeline(audio_path, **params)
+    try:
+        diarization = pyannote_pipeline(audio_path, **params)
+    except RuntimeError as e:
+        # Fallback automatique sur CPU si erreur MIOpen (GPU AMD incompatible)
+        if "miopenStatus" in str(e) or "MIOpen" in str(e):
+            logger.warning(f"Erreur MIOpen détectée: {e}")
+            logger.warning("Basculement automatique de Pyannote sur CPU...")
+            _fallback_pyannote_to_cpu()
+            # Réessayer sur CPU
+            diarization = pyannote_pipeline(audio_path, **params)
+        else:
+            raise
     
     segments = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
@@ -354,6 +413,15 @@ def diarize_audio(audio_path: str, min_speakers: Optional[int] = None,
         })
     
     return segments
+
+
+def _fallback_pyannote_to_cpu():
+    """Bascule le pipeline Pyannote sur CPU (fallback après erreur GPU)."""
+    global pyannote_pipeline
+    
+    if pyannote_pipeline is not None:
+        pyannote_pipeline.to(torch.device("cpu"))
+        logger.info("Pyannote basculé sur CPU avec succès")
 
 
 def merge_transcription_diarization(
@@ -460,6 +528,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Erreur au chargement de Whisper: {e}")
         raise
+    
+    # Afficher la configuration Pyannote
+    logger.info(f"🎯 PYANNOTE_DEVICE={PYANNOTE_DEVICE} (device cible pour Pyannote)")
     
     # Charger Pyannote au démarrage si HF_TOKEN est défini
     if HF_TOKEN:
