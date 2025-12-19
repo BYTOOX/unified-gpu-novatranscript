@@ -17,6 +17,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="0.0.0.0"
 PORT="${PORT:-8000}"
 LOG_FILE="${SCRIPT_DIR}/server.log"
+
+# Charger les variables depuis .env si le fichier existe
+ENV_FILE="${SCRIPT_DIR}/.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+fi
+
 HF_TOKEN="${HF_TOKEN:-}"
 
 # Configuration ROCm 7.1.1 et venv Python 3.12
