@@ -415,22 +415,20 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     )
     
     # Options de génération
-    generate_kwargs = {
-        "return_timestamps": True,
-    }
+    generate_kwargs = {}
     if language:
         generate_kwargs["language"] = language
     
     # Passer l'audio comme dict pour éviter que le pipeline essaie de le charger
     audio_input = {"array": audio_array, "sampling_rate": sample_rate}
     
-    # Transcription (ignore_warning pour chunk_length_s expérimental)
+    # Transcription avec timestamps (return_timestamps doit être passé directement au pipeline)
     result = pipe(
         audio_input,
-        generate_kwargs=generate_kwargs,
+        return_timestamps=True,  # Passé directement, pas dans generate_kwargs
+        generate_kwargs=generate_kwargs if generate_kwargs else None,
         chunk_length_s=30,
-        batch_size=8,
-        ignore_warning=True
+        batch_size=8
     )
     
     # Debug: afficher la structure du résultat
