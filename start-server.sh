@@ -18,6 +18,15 @@ HOST="0.0.0.0"
 PORT="${PORT:-8000}"
 LOG_FILE="${SCRIPT_DIR}/server.log"
 
+# Configuration ROCm 7.1.1 et venv Python 3.12
+VENV_PATH="/opt/whisper-venv"
+ROCM_LIB_PATH="/opt/rocm-7.1.1/lib"
+
+# Commande pour activer l'environnement dans distrobox
+run_in_venv() {
+    distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\$LD_LIBRARY_PATH && $*"
+}
+
 # Couleurs pour les logs
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -55,11 +64,12 @@ check_distrobox() {
 
 # Installer les dépendances
 install_deps() {
-    log_info "Installation des dépendances Python..."
+    log_info "Installation des dépendances Python dans le venv..."
     log_info "Dossier: $SCRIPT_DIR"
+    log_info "Venv: $VENV_PATH"
     
-    distrobox enter "$DISTROBOX_NAME" -- pip install --upgrade pip
-    distrobox enter "$DISTROBOX_NAME" -- pip install -r "$SCRIPT_DIR/requirements.txt"
+    run_in_venv "pip install --upgrade pip"
+    run_in_venv "pip install -r $SCRIPT_DIR/requirements.txt"
     
     log_info "Dépendances installées avec succès"
 }
@@ -68,22 +78,26 @@ install_deps() {
 start_server() {
     log_info "Démarrage du serveur sur $HOST:$PORT..."
     log_info "Dossier: $SCRIPT_DIR"
+    log_info "Venv: $VENV_PATH"
+    log_info "ROCm: $ROCM_LIB_PATH"
     
     # Vérifier l'accès GPU
     log_info "Vérification GPU..."
-    distrobox enter "$DISTROBOX_NAME" -- python3 -c "import torch; print('GPU:', torch.cuda.is_available())" || true
+    run_in_venv "python -c \"import torch; print('GPU:', torch.cuda.is_available()); print('HIP:', torch.version.hip)\"" || true
     
     # Lancer uvicorn
     cd "$SCRIPT_DIR"
-    distrobox enter "$DISTROBOX_NAME" -- uvicorn server:app --host "$HOST" --port "$PORT"
+    run_in_venv "cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT"
 }
 
 # Démarrer en background
 start_background() {
     log_info "Démarrage du serveur en arrière-plan..."
+    log_info "Venv: $VENV_PATH"
+    log_info "ROCm: $ROCM_LIB_PATH"
     
     cd "$SCRIPT_DIR"
-    nohup distrobox enter "$DISTROBOX_NAME" -- uvicorn server:app --host "$HOST" --port "$PORT" > "$LOG_FILE" 2>&1 &
+    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\$LD_LIBRARY_PATH && cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
     
     PID=$!
     echo $PID > "${SCRIPT_DIR}/server.pid"
