@@ -12,16 +12,31 @@ import os
 import shutil
 import logging
 import tempfile
+import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, List
 
+# Filtrer les warnings répétitifs de ROCm/HIP
+warnings.filterwarnings("ignore", message=".*bgemm_internal_cublaslt.*")
+warnings.filterwarnings("ignore", message=".*Flash Efficient attention.*experimental.*")
+warnings.filterwarnings("ignore", message=".*Mem Efficient attention.*experimental.*")
+
 import torch
 
 # ============================================================================
-# Monkey-patches pour compatibilité torchaudio >= 2.0 avec ROCm
-# Pyannote.audio utilise des APIs qui ont été modifiées/supprimées
+# Monkey-patches pour compatibilité PyTorch 2.6+ et torchaudio >= 2.0 avec ROCm
 # ============================================================================
+
+# Patch pour PyTorch 2.6+: autoriser les classes utilisées par Pyannote dans torch.load
+# Sans ça, on a l'erreur "WeightsUnpickler error: Unsupported global: torch.torch_version.TorchVersion"
+import torch.serialization
+try:
+    from torch.torch_version import TorchVersion
+    torch.serialization.add_safe_globals([TorchVersion])
+except (ImportError, AttributeError):
+    pass
+
 import torchaudio
 
 # Patch 1: set_audio_backend a été supprimé dans torchaudio 2.0+
