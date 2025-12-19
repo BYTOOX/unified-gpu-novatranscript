@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="0.0.0.0"
 PORT="${PORT:-8000}"
 LOG_FILE="${SCRIPT_DIR}/server.log"
+HF_TOKEN="${HF_TOKEN:-}"
 
 # Configuration ROCm 7.1.1 et venv Python 3.12
 VENV_PATH="/opt/whisper-venv"
@@ -24,7 +25,7 @@ ROCM_LIB_PATH="/opt/rocm-7.1.1/lib"
 
 # Commande pour activer l'environnement dans distrobox
 run_in_venv() {
-    distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && $*"
+    distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && export HF_TOKEN='$HF_TOKEN' && $*"
 }
 
 # Couleurs pour les logs
@@ -80,6 +81,11 @@ start_server() {
     log_info "Dossier: $SCRIPT_DIR"
     log_info "Venv: $VENV_PATH"
     log_info "ROCm: $ROCM_LIB_PATH"
+    if [ -n "$HF_TOKEN" ]; then
+        log_info "HF_TOKEN: défini (Pyannote sera chargé au démarrage)"
+    else
+        log_warn "HF_TOKEN: non défini (Pyannote sera chargé à la première requête)"
+    fi
     
     # Vérifier l'accès GPU
     log_info "Vérification GPU..."
@@ -97,7 +103,7 @@ start_background() {
     log_info "ROCm: $ROCM_LIB_PATH"
     
     cd "$SCRIPT_DIR"
-    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
+    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && export HF_TOKEN='$HF_TOKEN' && cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
     
     PID=$!
     echo $PID > "${SCRIPT_DIR}/server.pid"
@@ -150,6 +156,7 @@ main() {
             echo ""
             echo "Variables d'environnement:"
             echo "  PORT          Port du serveur (défaut: 8000)"
+            echo "  HF_TOKEN      Token Hugging Face pour charger Pyannote au démarrage"
             ;;
         *)
             check_distrobox

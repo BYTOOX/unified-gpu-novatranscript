@@ -98,6 +98,7 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = Path("/tmp/uploads")
 WHISPER_MODEL_ID = "openai/whisper-large-v3-turbo"
 PYANNOTE_MODEL_ID = "pyannote/speaker-diarization-3.1"
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 # Modèles globaux (chargés une seule fois au démarrage)
 whisper_model = None
@@ -419,6 +420,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Erreur au chargement de Whisper: {e}")
         raise
+    
+    # Charger Pyannote au démarrage si HF_TOKEN est défini
+    if HF_TOKEN:
+        logger.info("🔑 HF_TOKEN trouvé, chargement de Pyannote au démarrage...")
+        try:
+            load_pyannote_model(HF_TOKEN)
+        except Exception as e:
+            logger.error(f"Erreur au chargement de Pyannote: {e}", exc_info=True)
+            raise
+    else:
+        logger.warning("⚠️  HF_TOKEN non défini, Pyannote sera chargé à la première requête")
     
     logger.info("✅ Service prêt")
     logger.info("=" * 60)
