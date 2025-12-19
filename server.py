@@ -28,42 +28,21 @@ import torch
 # Monkey-patches pour compatibilité PyTorch 2.6+ et torchaudio >= 2.0 avec ROCm
 # ============================================================================
 
-# Patch pour PyTorch 2.6+: autoriser les classes utilisées par Pyannote dans torch.load
-# Sans ça, on a l'erreur "WeightsUnpickler error: Unsupported global: ..."
+# Patch pour PyTorch 2.6+: autoriser le chargement des modèles Pyannote
+# PyTorch 2.6 a changé weights_only=True par défaut, ce qui casse Pyannote
 import torch.serialization
 
-# Liste des classes à autoriser pour le chargement des modèles
-safe_globals = []
+# Monkey-patch torch.load pour forcer weights_only=False si non spécifié
+# Nécessaire car Pyannote utilise des classes custom dans ses checkpoints
+_original_torch_load = torch.load
 
-# TorchVersion (utilisé par plusieurs modèles)
-try:
-    from torch.torch_version import TorchVersion
-    safe_globals.append(TorchVersion)
-except (ImportError, AttributeError):
-    pass
+def _patched_torch_load(*args, **kwargs):
+    # Si weights_only n'est pas explicitement défini, le mettre à False
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
 
-# Classes Pyannote nécessaires pour speaker-diarization-3.1
-try:
-    from pyannote.audio.core.task import Specifications
-    safe_globals.append(Specifications)
-except (ImportError, AttributeError):
-    pass
-
-try:
-    from pyannote.audio.core.task import Problem
-    safe_globals.append(Problem)
-except (ImportError, AttributeError):
-    pass
-
-try:
-    from pyannote.audio.core.task import Resolution
-    safe_globals.append(Resolution)
-except (ImportError, AttributeError):
-    pass
-
-# Appliquer les patches
-if safe_globals:
-    torch.serialization.add_safe_globals(safe_globals)
+torch.load = _patched_torch_load
 
 import torchaudio
 
