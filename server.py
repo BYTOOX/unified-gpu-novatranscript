@@ -30,16 +30,15 @@ import torch
 
 # Patch pour PyTorch 2.6+: autoriser le chargement des modèles Pyannote
 # PyTorch 2.6 a changé weights_only=True par défaut, ce qui casse Pyannote
+# lightning_fabric passe explicitement weights_only=True, donc on doit forcer False
 import torch.serialization
 
-# Monkey-patch torch.load pour forcer weights_only=False si non spécifié
-# Nécessaire car Pyannote utilise des classes custom dans ses checkpoints
 _original_torch_load = torch.load
 
 def _patched_torch_load(*args, **kwargs):
-    # Si weights_only n'est pas explicitement défini, le mettre à False
-    if 'weights_only' not in kwargs:
-        kwargs['weights_only'] = False
+    # Forcer weights_only=False pour tous les appels
+    # Nécessaire car Pyannote/lightning passent explicitement weights_only=True
+    kwargs['weights_only'] = False
     return _original_torch_load(*args, **kwargs)
 
 torch.load = _patched_torch_load
