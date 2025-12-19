@@ -24,7 +24,7 @@ ROCM_LIB_PATH="/opt/rocm-7.1.1/lib"
 
 # Commande pour activer l'environnement dans distrobox
 run_in_venv() {
-    distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\$LD_LIBRARY_PATH && $*"
+    distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && $*"
 }
 
 # Couleurs pour les logs
@@ -97,7 +97,7 @@ start_background() {
     log_info "ROCm: $ROCM_LIB_PATH"
     
     cd "$SCRIPT_DIR"
-    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\$LD_LIBRARY_PATH && cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
+    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
     
     PID=$!
     echo $PID > "${SCRIPT_DIR}/server.pid"
