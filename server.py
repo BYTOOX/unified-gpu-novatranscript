@@ -426,7 +426,7 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     result = pipe(
         audio_input,
         return_timestamps=True,  # Passé directement, pas dans generate_kwargs
-        generate_kwargs=generate_kwargs if generate_kwargs else None,
+        generate_kwargs=generate_kwargs,  # Dict vide si pas de langue
         chunk_length_s=30,
         batch_size=8
     )
