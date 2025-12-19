@@ -19,15 +19,35 @@ from typing import Optional, List
 import torch
 
 # ============================================================================
-# Monkey-patch pour compatibilité torchaudio >= 2.0
-# La fonction set_audio_backend a été supprimée dans torchaudio 2.0+
-# Pyannote.audio ancien l'appelle encore, on crée une fonction vide
+# Monkey-patches pour compatibilité torchaudio >= 2.0
+# Pyannote.audio utilise des APIs qui ont été modifiées/supprimées
 # ============================================================================
 import torchaudio
+
+# Patch 1: set_audio_backend a été supprimé dans torchaudio 2.0+
 if not hasattr(torchaudio, 'set_audio_backend'):
     def _dummy_set_audio_backend(backend):
         pass
     torchaudio.set_audio_backend = _dummy_set_audio_backend
+
+# Patch 2: AudioMetaData est maintenant dans torchaudio._backend.utils
+# ou retourné par torchaudio.info(). On crée un alias si nécessaire.
+if not hasattr(torchaudio, 'AudioMetaData'):
+    try:
+        # Essayer de l'importer depuis le nouveau chemin
+        from torchaudio._backend.utils import AudioMetaData
+        torchaudio.AudioMetaData = AudioMetaData
+    except ImportError:
+        # Créer une classe factice si introuvable
+        class AudioMetaData:
+            def __init__(self, sample_rate=0, num_frames=0, num_channels=0, 
+                         bits_per_sample=0, encoding=None):
+                self.sample_rate = sample_rate
+                self.num_frames = num_frames
+                self.num_channels = num_channels
+                self.bits_per_sample = bits_per_sample
+                self.encoding = encoding
+        torchaudio.AudioMetaData = AudioMetaData
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -189,7 +209,7 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     from transformers import pipeline
     import librosa
     
-    # Charger l'audio
+    # Charger l'audio avec librosa (évite torchcodec)
     audio_array, sample_rate = librosa.load(audio_path, sr=16000)
     
     # Créer le pipeline de transcription
@@ -209,9 +229,12 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     if language:
         generate_kwargs["language"] = language
     
+    # Passer l'audio comme dict pour éviter que le pipeline essaie de le charger
+    audio_input = {"array": audio_array, "sampling_rate": sample_rate}
+    
     # Transcription
     result = pipe(
-        audio_array,
+        audio_input,
         generate_kwargs=generate_kwargs,
         chunk_length_s=30,
         batch_size=8

@@ -4,24 +4,44 @@ uvicorn[standard]
 python-multipart
 
 # Pyannote pour la diarization
-# Version 3.3+ est compatible avec torchaudio >= 2.0
-pyannote.audio>=3.3.1
+# IMPORTANT: Installer avec --no-deps pour éviter d'écraser PyTorch ROCm
+# pip install --no-deps pyannote.audio
+pyannote.audio>=3.3.1,<4.0.0
 
 # Transformers pour Whisper
 transformers>=4.39.0
 accelerate
 
+# Dépendances de pyannote.audio (installées séparément car --no-deps)
+asteroid-filterbanks>=0.4.0
+einops>=0.8.1
+pyannote-core>=6.0.1
+pyannote-database>=6.1.1
+pyannote-metrics>=4.0.0
+pyannote-pipeline>=4.0.0
+pytorch-metric-learning>=2.8.1
+rich>=13.9.4
+torch-audiomentations>=0.12.0
+torchmetrics>=1.6.1
+
 # PyTorch ROCm 7.1.1 - INSTALLÉ MANUELLEMENT via wheels AMD
-# Ne pas installer via pip, utiliser les wheels depuis:
+# Ne pas installer via pip standard, utiliser les wheels depuis:
 # https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/
 #
-# Installation manuelle requise:
-#   pip install triton-3.5.1+rocm7.1.1.gita272dfa8-cp312-cp312-linux_x86_64.whl
-#   pip install torch-2.9.1+rocm7.1.1.lw.git351ff442-cp312-cp312-linux_x86_64.whl
-#   pip install torchvision-0.24.0+rocm7.1.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl
-#   pip install torchaudio-2.9.0+rocm7.1.1.gite3c6ee2b-cp312-cp312-linux_x86_64.whl
+# ORDRE D'INSTALLATION IMPORTANT:
+# 1. Installer les wheels ROCm en premier:
+#    pip install triton-3.5.1+rocm7.1.1*.whl
+#    pip install torch-2.9.1+rocm7.1.1*.whl
+#    pip install torchvision-0.24.0+rocm7.1.1*.whl
+#    pip install torchaudio-2.9.0+rocm7.1.1*.whl
 #
-# Versions installées:
+# 2. Installer pyannote avec --no-deps:
+#    pip install --no-deps "pyannote.audio>=3.3.1,<4.0.0"
+#
+# 3. Installer le reste:
+#    pip install -r requirements.txt
+#
+# Versions ROCm attendues:
 # torch==2.9.1+rocm7.1.1
 # torchaudio==2.9.0+rocm7.1.1
 # torchvision==0.24.0+rocm7.1.1
