@@ -19,7 +19,7 @@ from typing import Optional, List
 import torch
 
 # ============================================================================
-# Monkey-patches pour compatibilité torchaudio >= 2.0
+# Monkey-patches pour compatibilité torchaudio >= 2.0 avec ROCm
 # Pyannote.audio utilise des APIs qui ont été modifiées/supprimées
 # ============================================================================
 import torchaudio
@@ -30,15 +30,24 @@ if not hasattr(torchaudio, 'set_audio_backend'):
         pass
     torchaudio.set_audio_backend = _dummy_set_audio_backend
 
-# Patch 2: AudioMetaData est maintenant dans torchaudio._backend.utils
-# ou retourné par torchaudio.info(). On crée un alias si nécessaire.
+# Patch 2: list_audio_backends a été supprimé dans torchaudio 2.0+
+if not hasattr(torchaudio, 'list_audio_backends'):
+    def _dummy_list_audio_backends():
+        return ['soundfile', 'sox']  # Retourner les backends courants
+    torchaudio.list_audio_backends = _dummy_list_audio_backends
+
+# Patch 3: get_audio_backend a été supprimé dans torchaudio 2.0+
+if not hasattr(torchaudio, 'get_audio_backend'):
+    def _dummy_get_audio_backend():
+        return 'soundfile'
+    torchaudio.get_audio_backend = _dummy_get_audio_backend
+
+# Patch 4: AudioMetaData est maintenant dans torchaudio._backend.utils
 if not hasattr(torchaudio, 'AudioMetaData'):
     try:
-        # Essayer de l'importer depuis le nouveau chemin
         from torchaudio._backend.utils import AudioMetaData
         torchaudio.AudioMetaData = AudioMetaData
     except ImportError:
-        # Créer une classe factice si introuvable
         class AudioMetaData:
             def __init__(self, sample_rate=0, num_frames=0, num_channels=0, 
                          bits_per_sample=0, encoding=None):
@@ -163,11 +172,11 @@ def load_whisper_model():
     
     logger.info(f"Chargement de Whisper: {WHISPER_MODEL_ID}")
     
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    model_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     
     whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained(
         WHISPER_MODEL_ID,
-        torch_dtype=torch_dtype,
+        dtype=model_dtype,
         low_cpu_mem_usage=True,
         use_safetensors=True
     )
@@ -218,7 +227,7 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
         model=whisper_model,
         tokenizer=whisper_processor.tokenizer,
         feature_extractor=whisper_processor.feature_extractor,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         device=device
     )
     
@@ -232,12 +241,13 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     # Passer l'audio comme dict pour éviter que le pipeline essaie de le charger
     audio_input = {"array": audio_array, "sampling_rate": sample_rate}
     
-    # Transcription
+    # Transcription (ignore_warning pour chunk_length_s expérimental)
     result = pipe(
         audio_input,
         generate_kwargs=generate_kwargs,
         chunk_length_s=30,
-        batch_size=8
+        batch_size=8,
+        ignore_warning=True
     )
     
     # Formater les segments
