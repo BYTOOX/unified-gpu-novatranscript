@@ -79,8 +79,62 @@ if not hasattr(torchaudio, 'AudioMetaData'):
                 self.encoding = encoding
         torchaudio.AudioMetaData = AudioMetaData
 
-# Patch 5: Forcer le backend soundfile au lieu de torchcodec (non installé)
-# torchaudio >= 2.5 utilise torchcodec par défaut qui n'est pas dispo sur ROCm
+# Patch 5: torchaudio.info a été supprimé dans torchaudio 2.0+
+# Pyannote l'utilise pour obtenir les métadonnées audio
+if not hasattr(torchaudio, 'info'):
+    def _patched_torchaudio_info(filepath, backend=None):
+        """
+        Remplacement de torchaudio.info pour torchaudio 2.0+
+        Retourne les métadonnées audio en utilisant soundfile ou librosa.
+        """
+        import soundfile as sf
+        
+        filepath_str = str(filepath)
+        
+        try:
+            # Utiliser soundfile pour obtenir les infos
+            info = sf.info(filepath_str)
+            
+            # Créer un objet compatible avec ce que Pyannote attend
+            class AudioInfo:
+                def __init__(self, sample_rate, num_frames, num_channels):
+                    self.sample_rate = sample_rate
+                    self.num_frames = num_frames
+                    self.num_channels = num_channels
+            
+            return AudioInfo(
+                sample_rate=info.samplerate,
+                num_frames=info.frames,
+                num_channels=info.channels
+            )
+        except Exception:
+            # Fallback avec librosa
+            import librosa
+            y, sr = librosa.load(filepath_str, sr=None, mono=False)
+            
+            class AudioInfo:
+                def __init__(self, sample_rate, num_frames, num_channels):
+                    self.sample_rate = sample_rate
+                    self.num_frames = num_frames
+                    self.num_channels = num_channels
+            
+            if len(y.shape) == 1:
+                num_channels = 1
+                num_frames = len(y)
+            else:
+                num_channels = y.shape[0]
+                num_frames = y.shape[1]
+            
+            return AudioInfo(
+                sample_rate=sr,
+                num_frames=num_frames,
+                num_channels=num_channels
+            )
+    
+    torchaudio.info = _patched_torchaudio_info
+
+# Patch 6: Forcer le backend soundfile au lieu de torchcodec (non installé)
+# torchaudio >= 2.5 utilise torchcodec par défaut qui n'est pas disponible sur ROCm
 _original_torchaudio_load = torchaudio.load
 
 def _patched_torchaudio_load(filepath, *args, **kwargs):
