@@ -45,12 +45,6 @@ torch.load = _patched_torch_load
 
 import torchaudio
 
-# #region agent log
-_log_path = "/tmp/debug_torchaudio.log"
-import json as _json
-with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"E","location":"server.py:module_load","message":"torchaudio version info","data":{"torchaudio_version":torchaudio.__version__}}) + "\n")
-# #endregion agent log
-
 # Patch 1: set_audio_backend a été supprimé dans torchaudio 2.0+
 if not hasattr(torchaudio, 'set_audio_backend'):
     def _dummy_set_audio_backend(backend):
@@ -90,46 +84,38 @@ if not hasattr(torchaudio, 'AudioMetaData'):
 _original_torchaudio_load = torchaudio.load
 
 def _patched_torchaudio_load(filepath, *args, **kwargs):
-    # #region agent log
-    _log_path = "/tmp/debug_torchaudio.log"
-    import json as _json
-    with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"A","location":"server.py:_patched_torchaudio_load","message":"torchaudio.load called","data":{"backend_in_kwargs":"backend" in kwargs,"backend_value":kwargs.get("backend"),"filepath":str(filepath),"args":str(args),"kwargs_keys":list(kwargs.keys())}}) + "\n")
-    # #endregion agent log
-    
-    # #region agent log - Hypothesis F/G: Try using soundfile directly to bypass torchaudio's new behavior
+    """
+    Patch pour contourner torchaudio 2.9+ qui utilise torchcodec par défaut.
+    torchcodec n'est pas disponible sur ROCm, donc on utilise soundfile/librosa directement.
+    """
+    # Essayer soundfile d'abord (rapide, supporte WAV/FLAC/OGG)
     try:
         import soundfile as sf
-        import numpy as np
-        _audio_data, _sample_rate = sf.read(str(filepath), dtype='float32')
-        # Convert to torch tensor in the format torchaudio expects: (channels, samples)
-        if len(_audio_data.shape) == 1:
-            _waveform = torch.from_numpy(_audio_data).unsqueeze(0)
+        audio_data, sample_rate = sf.read(str(filepath), dtype='float32')
+        # Convertir en tensor torch au format torchaudio: (channels, samples)
+        if len(audio_data.shape) == 1:
+            waveform = torch.from_numpy(audio_data).unsqueeze(0)
         else:
-            _waveform = torch.from_numpy(_audio_data.T)
-        with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"F","location":"server.py:_patched_torchaudio_load","message":"soundfile direct load SUCCESS","data":{"sample_rate":_sample_rate,"shape":list(_waveform.shape)}}) + "\n")
-        return _waveform, _sample_rate
-    except Exception as _sf_err:
-        with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"G","location":"server.py:_patched_torchaudio_load","message":"soundfile direct load FAILED, trying librosa","data":{"error":str(_sf_err)}}) + "\n")
-        # Try librosa as fallback (handles MP3 better)
-        try:
-            import librosa
-            _audio_array, _sample_rate = librosa.load(str(filepath), sr=None, mono=False)
-            if len(_audio_array.shape) == 1:
-                _waveform = torch.from_numpy(_audio_array).unsqueeze(0)
-            else:
-                _waveform = torch.from_numpy(_audio_array)
-            with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"G","location":"server.py:_patched_torchaudio_load","message":"librosa load SUCCESS","data":{"sample_rate":_sample_rate,"shape":list(_waveform.shape)}}) + "\n")
-            return _waveform.float(), _sample_rate
-        except Exception as _lib_err:
-            with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"H","location":"server.py:_patched_torchaudio_load","message":"librosa also FAILED, falling back to original","data":{"error":str(_lib_err)}}) + "\n")
-    # #endregion agent log
+            waveform = torch.from_numpy(audio_data.T)
+        return waveform, sample_rate
+    except Exception:
+        pass
     
-    # Forcer le backend soundfile si non spécifié
+    # Fallback sur librosa (supporte MP3 et autres formats via ffmpeg)
+    try:
+        import librosa
+        audio_array, sample_rate = librosa.load(str(filepath), sr=None, mono=False)
+        if len(audio_array.shape) == 1:
+            waveform = torch.from_numpy(audio_array).unsqueeze(0)
+        else:
+            waveform = torch.from_numpy(audio_array)
+        return waveform.float(), sample_rate
+    except Exception:
+        pass
+    
+    # Dernier recours: torchaudio original (peut échouer si torchcodec manque)
     if 'backend' not in kwargs:
         kwargs['backend'] = 'soundfile'
-    # #region agent log
-    with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"A","location":"server.py:_patched_torchaudio_load:after_check","message":"backend after check","data":{"final_backend":kwargs.get("backend")}}) + "\n")
-    # #endregion agent log
     return _original_torchaudio_load(filepath, *args, **kwargs)
 
 torchaudio.load = _patched_torchaudio_load
@@ -281,17 +267,6 @@ def load_pyannote_model(hf_token: str):
         use_auth_token=hf_token
     )
     
-    # #region agent log
-    _log_path = "/tmp/debug_torchaudio.log"
-    import json as _json
-    # Check pyannote's segmentation model audio backend
-    _seg_model = getattr(pyannote_pipeline, '_segmentation', None)
-    _seg_audio_backend = None
-    if _seg_model and hasattr(_seg_model, 'model') and hasattr(_seg_model.model, 'audio'):
-        _seg_audio_backend = getattr(_seg_model.model.audio, 'backend', 'NOT_FOUND')
-    with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"B","location":"server.py:load_pyannote_model","message":"pyannote pipeline audio backend","data":{"seg_audio_backend":str(_seg_audio_backend),"has_segmentation":_seg_model is not None}}) + "\n")
-    # #endregion agent log
-    
     if torch.cuda.is_available():
         pyannote_pipeline.to(torch.device("cuda"))
     
@@ -367,12 +342,6 @@ def diarize_audio(audio_path: str, min_speakers: Optional[int] = None,
         params["min_speakers"] = min_speakers
     if max_speakers:
         params["max_speakers"] = max_speakers
-    
-    # #region agent log
-    _log_path = "/tmp/debug_torchaudio.log"
-    import json as _json
-    with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"C","location":"server.py:diarize_audio","message":"before pyannote call","data":{"audio_path":audio_path,"torchaudio_load_is_patched":torchaudio.load.__name__}}) + "\n")
-    # #endregion agent log
     
     diarization = pyannote_pipeline(audio_path, **params)
     
