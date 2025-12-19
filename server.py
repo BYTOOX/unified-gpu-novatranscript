@@ -81,55 +81,49 @@ if not hasattr(torchaudio, 'AudioMetaData'):
 
 # Patch 5: torchaudio.info a été supprimé dans torchaudio 2.0+
 # Pyannote l'utilise pour obtenir les métadonnées audio
+# On doit charger l'audio pour avoir les vraies dimensions (cohérent avec load)
 if not hasattr(torchaudio, 'info'):
     def _patched_torchaudio_info(filepath, backend=None):
         """
         Remplacement de torchaudio.info pour torchaudio 2.0+
-        Retourne les métadonnées audio en utilisant soundfile ou librosa.
+        Charge l'audio pour obtenir les métadonnées exactes (cohérent avec load).
         """
         import soundfile as sf
         
         filepath_str = str(filepath)
         
+        class AudioInfo:
+            def __init__(self, sample_rate, num_frames, num_channels):
+                self.sample_rate = sample_rate
+                self.num_frames = num_frames
+                self.num_channels = num_channels
+        
+        # Essayer soundfile d'abord
         try:
-            # Utiliser soundfile pour obtenir les infos
-            info = sf.info(filepath_str)
-            
-            # Créer un objet compatible avec ce que Pyannote attend
-            class AudioInfo:
-                def __init__(self, sample_rate, num_frames, num_channels):
-                    self.sample_rate = sample_rate
-                    self.num_frames = num_frames
-                    self.num_channels = num_channels
-            
-            return AudioInfo(
-                sample_rate=info.samplerate,
-                num_frames=info.frames,
-                num_channels=info.channels
-            )
+            audio_data, sample_rate = sf.read(filepath_str, dtype='float32')
+            if len(audio_data.shape) == 1:
+                num_channels = 1
+                num_frames = len(audio_data)
+            else:
+                num_frames = audio_data.shape[0]
+                num_channels = audio_data.shape[1]
+            return AudioInfo(sample_rate, num_frames, num_channels)
         except Exception:
-            # Fallback avec librosa
+            pass
+        
+        # Fallback avec librosa
+        try:
             import librosa
             y, sr = librosa.load(filepath_str, sr=None, mono=False)
-            
-            class AudioInfo:
-                def __init__(self, sample_rate, num_frames, num_channels):
-                    self.sample_rate = sample_rate
-                    self.num_frames = num_frames
-                    self.num_channels = num_channels
-            
             if len(y.shape) == 1:
                 num_channels = 1
                 num_frames = len(y)
             else:
                 num_channels = y.shape[0]
                 num_frames = y.shape[1]
-            
-            return AudioInfo(
-                sample_rate=sr,
-                num_frames=num_frames,
-                num_channels=num_channels
-            )
+            return AudioInfo(sr, num_frames, num_channels)
+        except Exception as e:
+            raise RuntimeError(f"Impossible de lire les métadonnées audio: {e}")
     
     torchaudio.info = _patched_torchaudio_info
 
@@ -137,15 +131,29 @@ if not hasattr(torchaudio, 'info'):
 # torchaudio >= 2.5 utilise torchcodec par défaut qui n'est pas disponible sur ROCm
 _original_torchaudio_load = torchaudio.load
 
-def _patched_torchaudio_load(filepath, *args, **kwargs):
+def _patched_torchaudio_load(filepath, frame_offset=0, num_frames=-1, *args, **kwargs):
     """
     Patch pour contourner torchaudio 2.9+ qui utilise torchcodec par défaut.
-    torchcodec n'est pas disponible sur ROCm, donc on utilise soundfile/librosa directement.
+    Supporte frame_offset et num_frames pour le cropping (utilisé par Pyannote).
     """
+    import soundfile as sf
+    
+    filepath_str = str(filepath)
+    
     # Essayer soundfile d'abord (rapide, supporte WAV/FLAC/OGG)
     try:
-        import soundfile as sf
-        audio_data, sample_rate = sf.read(str(filepath), dtype='float32')
+        # Lire avec offset et limite si spécifiés
+        if frame_offset > 0 or num_frames > 0:
+            stop = frame_offset + num_frames if num_frames > 0 else None
+            audio_data, sample_rate = sf.read(
+                filepath_str, 
+                start=frame_offset, 
+                stop=stop,
+                dtype='float32'
+            )
+        else:
+            audio_data, sample_rate = sf.read(filepath_str, dtype='float32')
+        
         # Convertir en tensor torch au format torchaudio: (channels, samples)
         if len(audio_data.shape) == 1:
             waveform = torch.from_numpy(audio_data).unsqueeze(0)
@@ -158,11 +166,21 @@ def _patched_torchaudio_load(filepath, *args, **kwargs):
     # Fallback sur librosa (supporte MP3 et autres formats via ffmpeg)
     try:
         import librosa
-        audio_array, sample_rate = librosa.load(str(filepath), sr=None, mono=False)
+        # librosa.load ne supporte pas offset/duration en frames, on charge tout et on slice
+        audio_array, sample_rate = librosa.load(filepath_str, sr=None, mono=False)
+        
         if len(audio_array.shape) == 1:
             waveform = torch.from_numpy(audio_array).unsqueeze(0)
         else:
             waveform = torch.from_numpy(audio_array)
+        
+        # Appliquer offset et num_frames
+        if frame_offset > 0 or num_frames > 0:
+            if num_frames > 0:
+                waveform = waveform[:, frame_offset:frame_offset + num_frames]
+            else:
+                waveform = waveform[:, frame_offset:]
+        
         return waveform.float(), sample_rate
     except Exception:
         pass
@@ -170,7 +188,7 @@ def _patched_torchaudio_load(filepath, *args, **kwargs):
     # Dernier recours: torchaudio original (peut échouer si torchcodec manque)
     if 'backend' not in kwargs:
         kwargs['backend'] = 'soundfile'
-    return _original_torchaudio_load(filepath, *args, **kwargs)
+    return _original_torchaudio_load(filepath, frame_offset, num_frames, *args, **kwargs)
 
 torchaudio.load = _patched_torchaudio_load
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
