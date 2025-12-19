@@ -433,9 +433,13 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
         ignore_warning=True
     )
     
+    # Debug: afficher la structure du résultat
+    logger.info(f"Whisper result keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+    
     # Formater les segments
     segments = []
     if "chunks" in result:
+        logger.info(f"Found {len(result['chunks'])} chunks in result")
         for chunk in result["chunks"]:
             if chunk.get("timestamp"):
                 start, end = chunk["timestamp"]
@@ -445,6 +449,8 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
                         "end": round(end, 3),
                         "text": chunk["text"].strip()
                     })
+    else:
+        logger.warning("No 'chunks' found in Whisper result - segments will be empty")
     
     full_text = result.get("text", "").strip()
     logger.info(f"Transcription terminée: {len(full_text)} caractères, {len(segments)} segments")
