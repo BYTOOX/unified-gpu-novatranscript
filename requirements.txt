@@ -1,7 +1,19 @@
+# FastAPI et serveur
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
+
+# Pyannote pour la diarization
 pyannote.audio==3.1.1
+
+# Transformers pour Whisper
+transformers>=4.39.0
+accelerate
+
+# PyTorch (déjà installé dans le conteneur ROCm, mais listé pour documentation)
 torch
 torchaudio
 
+# Audio processing
+librosa
+soundfile
