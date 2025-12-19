@@ -4,7 +4,8 @@ uvicorn[standard]
 python-multipart
 
 # Pyannote pour la diarization
-pyannote.audio==3.1.1
+# Version 3.3+ est compatible avec torchaudio >= 2.0
+pyannote.audio>=3.3.1
 
 # Transformers pour Whisper
 transformers>=4.39.0

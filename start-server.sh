@@ -83,7 +83,7 @@ start_server() {
     
     # Vérifier l'accès GPU
     log_info "Vérification GPU..."
-    run_in_venv "python -c \"import torch; print('GPU:', torch.cuda.is_available()); print('HIP:', torch.version.hip)\"" || true
+    run_in_venv 'python -c "import torch; print(\"GPU:\", torch.cuda.is_available()); print(\"HIP:\", torch.version.hip)"' || true
     
     # Lancer uvicorn
     cd "$SCRIPT_DIR"

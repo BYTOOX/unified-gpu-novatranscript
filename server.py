@@ -17,6 +17,17 @@ from pathlib import Path
 from typing import Optional, List
 
 import torch
+
+# ============================================================================
+# Monkey-patch pour compatibilité torchaudio >= 2.0
+# La fonction set_audio_backend a été supprimée dans torchaudio 2.0+
+# Pyannote.audio ancien l'appelle encore, on crée une fonction vide
+# ============================================================================
+import torchaudio
+if not hasattr(torchaudio, 'set_audio_backend'):
+    def _dummy_set_audio_backend(backend):
+        pass
+    torchaudio.set_audio_backend = _dummy_set_audio_backend
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
