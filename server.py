@@ -446,8 +446,11 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
                         "text": chunk["text"].strip()
                     })
     
+    full_text = result.get("text", "").strip()
+    logger.info(f"Transcription terminée: {len(full_text)} caractères, {len(segments)} segments")
+    
     return {
-        "text": result.get("text", "").strip(),
+        "text": full_text,
         "segments": segments
     }
 
@@ -483,6 +486,10 @@ def diarize_audio(audio_path: str, min_speakers: Optional[int] = None,
             "end": round(turn.end, 3),
             "speaker": speaker  # str comme "SPEAKER_00"
         })
+    
+    logger.info(f"Diarization terminée: {len(segments)} segments de locuteurs détectés")
+    if not segments:
+        logger.warning("Aucun locuteur détecté - le fichier audio est peut-être trop court ou silencieux")
     
     return segments
 
