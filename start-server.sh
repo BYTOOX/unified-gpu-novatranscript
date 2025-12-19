@@ -56,11 +56,10 @@ check_distrobox() {
 # Installer les dépendances
 install_deps() {
     log_info "Installation des dépendances Python..."
-    distrobox enter "$DISTROBOX_NAME" -- bash -c "
-        cd '$SCRIPT_DIR'
-        pip install --upgrade pip
-        pip install -r requirements.txt
-    "
+    log_info "Dossier: $SCRIPT_DIR"
+    
+    distrobox enter "$DISTROBOX_NAME" -- bash -c "cd \"$SCRIPT_DIR\" && pip install --upgrade pip && pip install -r requirements.txt"
+    
     log_info "Dépendances installées avec succès"
 }
 
@@ -70,10 +69,10 @@ start_server() {
     log_info "Logs: $LOG_FILE"
     
     distrobox enter "$DISTROBOX_NAME" -- bash -c "
-        cd '$SCRIPT_DIR'
+        cd \"$SCRIPT_DIR\"
         
         # Vérifier l'accès GPU
-        python3 -c 'import torch; print(f\"GPU disponible: {torch.cuda.is_available()}\"); print(f\"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}\")' || true
+        python3 -c 'import torch; print(f\"GPU disponible: {torch.cuda.is_available()}\"); print(f\"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}\")'  || true
         
         # Lancer uvicorn
         uvicorn server:app --host $HOST --port $PORT
@@ -84,10 +83,7 @@ start_server() {
 start_background() {
     log_info "Démarrage du serveur en arrière-plan..."
     
-    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "
-        cd '$SCRIPT_DIR'
-        uvicorn server:app --host $HOST --port $PORT
-    " > "$LOG_FILE" 2>&1 &
+    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "cd \"$SCRIPT_DIR\" && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
     
     PID=$!
     echo $PID > "${SCRIPT_DIR}/server.pid"
@@ -149,4 +145,3 @@ main() {
 }
 
 main "$@"
-
