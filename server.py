@@ -95,6 +95,35 @@ def _patched_torchaudio_load(filepath, *args, **kwargs):
     import json as _json
     with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"A","location":"server.py:_patched_torchaudio_load","message":"torchaudio.load called","data":{"backend_in_kwargs":"backend" in kwargs,"backend_value":kwargs.get("backend"),"filepath":str(filepath),"args":str(args),"kwargs_keys":list(kwargs.keys())}}) + "\n")
     # #endregion agent log
+    
+    # #region agent log - Hypothesis F/G: Try using soundfile directly to bypass torchaudio's new behavior
+    try:
+        import soundfile as sf
+        import numpy as np
+        _audio_data, _sample_rate = sf.read(str(filepath), dtype='float32')
+        # Convert to torch tensor in the format torchaudio expects: (channels, samples)
+        if len(_audio_data.shape) == 1:
+            _waveform = torch.from_numpy(_audio_data).unsqueeze(0)
+        else:
+            _waveform = torch.from_numpy(_audio_data.T)
+        with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"F","location":"server.py:_patched_torchaudio_load","message":"soundfile direct load SUCCESS","data":{"sample_rate":_sample_rate,"shape":list(_waveform.shape)}}) + "\n")
+        return _waveform, _sample_rate
+    except Exception as _sf_err:
+        with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"G","location":"server.py:_patched_torchaudio_load","message":"soundfile direct load FAILED, trying librosa","data":{"error":str(_sf_err)}}) + "\n")
+        # Try librosa as fallback (handles MP3 better)
+        try:
+            import librosa
+            _audio_array, _sample_rate = librosa.load(str(filepath), sr=None, mono=False)
+            if len(_audio_array.shape) == 1:
+                _waveform = torch.from_numpy(_audio_array).unsqueeze(0)
+            else:
+                _waveform = torch.from_numpy(_audio_array)
+            with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"G","location":"server.py:_patched_torchaudio_load","message":"librosa load SUCCESS","data":{"sample_rate":_sample_rate,"shape":list(_waveform.shape)}}) + "\n")
+            return _waveform.float(), _sample_rate
+        except Exception as _lib_err:
+            with open(_log_path, "a") as _f: _f.write(_json.dumps({"hypothesisId":"H","location":"server.py:_patched_torchaudio_load","message":"librosa also FAILED, falling back to original","data":{"error":str(_lib_err)}}) + "\n")
+    # #endregion agent log
+    
     # Forcer le backend soundfile si non spécifié
     if 'backend' not in kwargs:
         kwargs['backend'] = 'soundfile'
