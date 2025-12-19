@@ -29,13 +29,41 @@ import torch
 # ============================================================================
 
 # Patch pour PyTorch 2.6+: autoriser les classes utilisées par Pyannote dans torch.load
-# Sans ça, on a l'erreur "WeightsUnpickler error: Unsupported global: torch.torch_version.TorchVersion"
+# Sans ça, on a l'erreur "WeightsUnpickler error: Unsupported global: ..."
 import torch.serialization
+
+# Liste des classes à autoriser pour le chargement des modèles
+safe_globals = []
+
+# TorchVersion (utilisé par plusieurs modèles)
 try:
     from torch.torch_version import TorchVersion
-    torch.serialization.add_safe_globals([TorchVersion])
+    safe_globals.append(TorchVersion)
 except (ImportError, AttributeError):
     pass
+
+# Classes Pyannote nécessaires pour speaker-diarization-3.1
+try:
+    from pyannote.audio.core.task import Specifications
+    safe_globals.append(Specifications)
+except (ImportError, AttributeError):
+    pass
+
+try:
+    from pyannote.audio.core.task import Problem
+    safe_globals.append(Problem)
+except (ImportError, AttributeError):
+    pass
+
+try:
+    from pyannote.audio.core.task import Resolution
+    safe_globals.append(Resolution)
+except (ImportError, AttributeError):
+    pass
+
+# Appliquer les patches
+if safe_globals:
+    torch.serialization.add_safe_globals(safe_globals)
 
 import torchaudio
 
