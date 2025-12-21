@@ -50,3 +50,6 @@ torchmetrics>=1.6.1
 # Audio processing
 librosa
 soundfile
+
+# VAD pour filtrer les silences (prévention hallucinations Whisper)
+silero-vad>=5.1

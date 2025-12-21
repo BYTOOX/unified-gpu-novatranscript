@@ -201,6 +201,16 @@ torchaudio.load = _patched_torchaudio_load
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import zlib
+import re
+
+# Silero VAD pour filtrer les silences (prévention hallucinations)
+try:
+    from silero_vad import load_silero_vad, get_speech_timestamps
+    SILERO_VAD_AVAILABLE = True
+except ImportError:
+    SILERO_VAD_AVAILABLE = False
+    logger = logging.getLogger(__name__)  # Temporary logger before full config
 
 # Configuration du logging
 logging.basicConfig(
@@ -228,6 +238,58 @@ whisper_processor = None
 pyannote_pipeline = None
 device = None
 hf_token_loaded = None
+silero_vad_model = None  # Chargé à la demande
+
+# ============================================================================
+# Configuration qualité transcription
+# ============================================================================
+
+# Patterns d'hallucination connus (sous-titrage TV, YouTube, etc.)
+HALLUCINATION_PATTERNS = [
+    # Sous-titrage TV/Radio français
+    r"sous[- ]?titrag?e?\s*(st['\u2019]?\s*\d*)?",
+    r"sous[- ]?titrag?e?\s*soci[ée]t[ée]\s*radio[- ]?canada",
+    r"sous[- ]?titr[ée]\s*(par|par\s+la)?",
+    
+    # Sous-titrage anglais
+    r"subtitl(es?|ing|ed)\s*(by)?",
+    r"translated?\s*by\s*amara",
+    r"amara\.?org",
+    r"transcri(bed?|ption)\s*by",
+    
+    # Phrases YouTube typiques (hallucinations de fin)
+    r"n['\u2019]oubliez\s*pas\s*(de\s*)?(vous\s*)?abonn",
+    r"merci\s+(d['\u2019]avoir\s+)?regard[ée]",
+    r"(thanks?|thank\s*you)\s*(for\s*)?(watching|listening)",
+    r"(don['\u2019]t\s*)?forget\s*to\s*(like|subscribe)",
+    r"like\s*(and|&)\s*subscribe",
+    r"abonnez[- ]?vous",
+    r"laissez\s*(un\s*)?commentaire",
+    
+    # Artefacts génériques
+    r"^\s*[.!?,;:\-\u2013\u2014]+\s*$",  # Que de la ponctuation
+    r"^\.{3,}$",  # Ellipses multiples
+    r"^\s*\.\.\.\s*$",
+]
+
+# Seuils de qualité
+QUALITY_THRESHOLDS = {
+    "compression_ratio_max": 2.8,      # Ratio zlib > 2.8 = trop répétitif
+    "repetition_ratio_max": 0.65,      # > 65% de mots identiques = boucle
+    "min_segment_chars": 2,            # Segments trop courts = probablement erreur
+    "max_word_repeat_count": 4,        # Même mot 4+ fois de suite = loop
+    "min_unique_words_ratio": 0.25,    # Au moins 25% de mots uniques
+}
+
+# Options de génération Whisper optimisées pour la qualité
+WHISPER_GENERATE_KWARGS = {
+    "no_repeat_ngram_size": 3,         # Empêche répétition de n-grams
+    "num_beams": 5,                    # Beam search pour meilleure qualité
+    "patience": 2.0,                   # Plus de patience dans le beam search
+}
+
+# Temperature fallback (commence à 0, monte si échec)
+WHISPER_TEMPERATURE_FALLBACK = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 # ============================================================================
 # État global du job en cours (pour multi-threading et status)
@@ -416,6 +478,245 @@ def detect_rocm() -> bool:
     return False
 
 
+# ============================================================================
+# Fonctions de filtrage qualité
+# ============================================================================
+
+def calculate_compression_ratio(text: str) -> float:
+    """
+    Calcule le ratio de compression zlib.
+    Un texte très répétitif aura un ratio élevé car il se compresse bien.
+    """
+    if not text or len(text) < 10:
+        return 0.0
+    text_bytes = text.encode('utf-8')
+    compressed = zlib.compress(text_bytes, level=9)
+    return len(text_bytes) / len(compressed)
+
+
+def detect_word_loops(text: str) -> tuple[bool, Optional[str]]:
+    """
+    Détecte les boucles de mots répétés.
+    Ex: "d'un d'un d'un d'un" ou "3, 2, 3, 2, 3, 2"
+    
+    Returns:
+        (is_loop, detected_pattern)
+    """
+    if not text:
+        return False, None
+    
+    # Normaliser le texte
+    text_lower = text.lower().strip()
+    
+    # Pattern 1: Mot simple répété 4+ fois consécutives
+    # Matches: "oui oui oui oui", "non non non non"
+    pattern1 = r'\b([\w\'\u2019àâäéèêëïîôùûüç-]+)\s+(?:\1[\s,]*){3,}'
+    match1 = re.search(pattern1, text_lower, re.IGNORECASE | re.UNICODE)
+    if match1:
+        return True, f"mot répété: '{match1.group(1)}'"
+    
+    # Pattern 2: Séquence courte répétée (2-4 tokens)
+    # Matches: "c'est parti, c'est parti, c'est parti"
+    words = re.findall(r'[\w\'\u2019àâäéèêëïîôùûüç-]+', text_lower)
+    if len(words) >= 8:
+        # Chercher des patterns de 2-4 mots répétés
+        for pattern_len in range(2, 5):
+            for start in range(len(words) - pattern_len * 3):
+                pattern_words = tuple(words[start:start + pattern_len])
+                repeat_count = 1
+                pos = start + pattern_len
+                while pos + pattern_len <= len(words):
+                    if tuple(words[pos:pos + pattern_len]) == pattern_words:
+                        repeat_count += 1
+                        pos += pattern_len
+                    else:
+                        break
+                if repeat_count >= 3:
+                    return True, f"phrase répétée {repeat_count}x: '{' '.join(pattern_words)}'"
+    
+    # Pattern 3: Séquence de chiffres/nombres alternés
+    # Matches: "3, 2, 3, 2, 3, 2" ou "1 2 1 2 1 2"
+    numbers = re.findall(r'\d+', text_lower)
+    if len(numbers) >= 6:
+        for pattern_len in range(2, 4):
+            pattern = tuple(numbers[:pattern_len])
+            matches = 0
+            for i in range(0, len(numbers) - pattern_len + 1, pattern_len):
+                if tuple(numbers[i:i + pattern_len]) == pattern:
+                    matches += 1
+            if matches >= 3:
+                return True, f"nombres répétés: {pattern}"
+    
+    return False, None
+
+
+def calculate_repetition_ratio(text: str) -> float:
+    """
+    Calcule le ratio de répétition dans un texte.
+    Retourne la proportion de mots non-uniques.
+    """
+    words = re.findall(r'[\w\'\u2019àâäéèêëïîôùûüç-]+', text.lower())
+    if len(words) < 3:
+        return 0.0
+    unique = len(set(words))
+    return 1.0 - (unique / len(words))
+
+
+def is_hallucination(text: str) -> bool:
+    """Vérifie si le texte correspond à un pattern d'hallucination connu."""
+    if not text:
+        return False
+    text_lower = text.lower().strip()
+    
+    for pattern in HALLUCINATION_PATTERNS:
+        if re.search(pattern, text_lower, re.IGNORECASE | re.UNICODE):
+            return True
+    return False
+
+
+def filter_hallucinations(text: str) -> str:
+    """Supprime les patterns d'hallucination du texte."""
+    if not text:
+        return text
+    
+    result = text
+    for pattern in HALLUCINATION_PATTERNS:
+        result = re.sub(pattern, '', result, flags=re.IGNORECASE | re.UNICODE)
+    
+    # Nettoyer les espaces multiples
+    result = re.sub(r'\s+', ' ', result).strip()
+    return result
+
+
+def validate_segment(segment: dict) -> tuple[bool, Optional[str]]:
+    """
+    Valide un segment de transcription.
+    
+    Returns:
+        (is_valid, reason_if_invalid)
+    """
+    text = segment.get("text", "").strip()
+    
+    # Segment vide ou trop court
+    if len(text) < QUALITY_THRESHOLDS["min_segment_chars"]:
+        return False, "segment trop court"
+    
+    # Vérifier si c'est une hallucination connue
+    if is_hallucination(text):
+        return False, "hallucination détectée"
+    
+    # Vérifier le ratio de compression (texte répétitif)
+    compression = calculate_compression_ratio(text)
+    if compression > QUALITY_THRESHOLDS["compression_ratio_max"]:
+        return False, f"compression ratio trop élevé ({compression:.2f})"
+    
+    # Vérifier les boucles de mots
+    is_loop, loop_pattern = detect_word_loops(text)
+    if is_loop:
+        return False, f"boucle détectée: {loop_pattern}"
+    
+    # Vérifier le ratio de répétition
+    rep_ratio = calculate_repetition_ratio(text)
+    if rep_ratio > QUALITY_THRESHOLDS["repetition_ratio_max"]:
+        return False, f"ratio répétition trop élevé ({rep_ratio:.2%})"
+    
+    return True, None
+
+
+def clean_segment_text(text: str) -> str:
+    """Nettoie le texte d'un segment (supprime artefacts, loops partiels)."""
+    if not text:
+        return text
+    
+    # Supprimer les hallucinations
+    cleaned = filter_hallucinations(text)
+    
+    # Supprimer les répétitions de mots simples (garde 1 occurence)
+    # Ex: "oui oui oui" -> "oui"
+    cleaned = re.sub(
+        r'\b([\w\'\u2019àâäéèêëïîôùûüç-]+)(?:\s+\1){2,}\b',
+        r'\1',
+        cleaned,
+        flags=re.IGNORECASE | re.UNICODE
+    )
+    
+    # Supprimer les répétitions avec virgules
+    # Ex: "oui, oui, oui, oui" -> "oui"
+    cleaned = re.sub(
+        r'\b([\w\'\u2019àâäéèêëïîôùûüç-]+)(?:\s*,\s*\1){2,}\b',
+        r'\1',
+        cleaned,
+        flags=re.IGNORECASE | re.UNICODE
+    )
+    
+    # Nettoyer les espaces et ponctuation multiples
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    cleaned = re.sub(r'([,.])\1+', r'\1', cleaned)
+    
+    return cleaned.strip()
+
+
+def load_silero_vad_model():
+    """Charge le modèle Silero VAD si disponible."""
+    global silero_vad_model
+    
+    if not SILERO_VAD_AVAILABLE:
+        logger.warning("Silero VAD non disponible - pip install silero-vad")
+        return None
+    
+    if silero_vad_model is None:
+        logger.info("Chargement du modèle Silero VAD...")
+        silero_vad_model = load_silero_vad()
+        logger.info("Silero VAD chargé avec succès")
+    
+    return silero_vad_model
+
+
+def apply_vad_to_audio(audio_array, sample_rate: int = 16000) -> tuple:
+    """
+    Applique le VAD pour extraire uniquement les segments de parole.
+    Retourne l'audio filtré et les timestamps des segments.
+    """
+    vad_model = load_silero_vad_model()
+    if vad_model is None:
+        return audio_array, []  # Retourner l'audio original si pas de VAD
+    
+    # Convertir en tensor si nécessaire
+    if not isinstance(audio_array, torch.Tensor):
+        audio_tensor = torch.from_numpy(audio_array).float()
+    else:
+        audio_tensor = audio_array.float()
+    
+    # Obtenir les timestamps de parole
+    speech_timestamps = get_speech_timestamps(
+        audio_tensor,
+        vad_model,
+        sampling_rate=sample_rate,
+        threshold=0.5,  # Seuil de détection
+        min_speech_duration_ms=250,  # Minimum 250ms de parole
+        min_silence_duration_ms=100,  # Minimum 100ms de silence pour couper
+        speech_pad_ms=30,  # Padding autour de la parole
+    )
+    
+    if not speech_timestamps:
+        logger.warning("VAD: Aucun segment de parole détecté!")
+        return audio_array, []
+    
+    # Assembler les segments de parole
+    speech_segments = []
+    for ts in speech_timestamps:
+        speech_segments.append(audio_tensor[ts['start']:ts['end']])
+    
+    # Concaténer tous les segments
+    if speech_segments:
+        filtered_audio = torch.cat(speech_segments).numpy()
+        logger.info(f"VAD: {len(speech_timestamps)} segments de parole, "
+                   f"{len(filtered_audio)/sample_rate:.1f}s gardé sur {len(audio_array)/sample_rate:.1f}s original")
+        return filtered_audio, speech_timestamps
+    
+    return audio_array, []
+
+
 def load_whisper_model():
     """Charge le modèle Whisper une seule fois."""
     global whisper_model, whisper_processor, device
@@ -509,7 +810,14 @@ def _get_pyannote_device() -> str:
 
 
 def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
-    """Transcrit l'audio avec Whisper."""
+    """
+    Transcrit l'audio avec Whisper.
+    
+    Améliorations qualité:
+    - VAD (Voice Activity Detection) pour filtrer les silences
+    - Paramètres de génération optimisés anti-répétition
+    - Filtrage des hallucinations et boucles post-transcription
+    """
     global whisper_model, whisper_processor, device
     
     from transformers import pipeline
@@ -519,13 +827,32 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     
     # Charger l'audio avec librosa (évite torchcodec)
     logger.info("Chargement de l'audio...")
-    update_job_status(progress=10, audio_loading=True)
+    update_job_status(progress=8, audio_loading=True)
     audio_array, sample_rate = librosa.load(audio_path, sr=16000)
     
-    # Calculer la durée pour l'estimation
+    # Calculer la durée originale
+    original_duration = len(audio_array) / sample_rate
+    logger.info(f"Audio chargé: {original_duration:.1f} secondes")
+    
+    # Appliquer VAD pour filtrer les silences (prévention hallucinations)
+    update_job_status(progress=10, stage_detail="VAD filtering")
+    if SILERO_VAD_AVAILABLE:
+        logger.info("Application du VAD pour filtrer les silences...")
+        audio_array, speech_timestamps = apply_vad_to_audio(audio_array, sample_rate)
+        vad_duration = len(audio_array) / sample_rate
+        update_job_status(
+            progress=15, 
+            vad_applied=True,
+            original_duration_s=round(original_duration, 1),
+            vad_duration_s=round(vad_duration, 1),
+            speech_segments=len(speech_timestamps)
+        )
+    else:
+        logger.warning("VAD non disponible, traitement de l'audio complet")
+        update_job_status(progress=15, vad_applied=False)
+    
     duration_seconds = len(audio_array) / sample_rate
-    update_job_status(progress=15, audio_duration_seconds=round(duration_seconds, 1))
-    logger.info(f"Audio chargé: {duration_seconds:.1f} secondes")
+    update_job_status(audio_duration_seconds=round(duration_seconds, 1))
     
     # Créer le pipeline de transcription
     pipe = pipeline(
@@ -537,40 +864,42 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
         device=device
     )
     
-    # Options de génération
-    generate_kwargs = {}
+    # Options de génération optimisées pour la qualité
+    generate_kwargs = {
+        **WHISPER_GENERATE_KWARGS,  # no_repeat_ngram_size, num_beams, patience
+    }
     if language:
         generate_kwargs["language"] = language
     
-    # Passer l'audio comme dict pour éviter que le pipeline essaie de le charger
+    # Passer l'audio comme dict
     audio_input = {"array": audio_array, "sampling_rate": sample_rate}
     
     update_job_status(progress=20)
-    logger.info("Transcription en cours...")
+    logger.info(f"Transcription en cours (generate_kwargs: {generate_kwargs})...")
     
-    # Transcription avec timestamps (return_timestamps doit être passé directement au pipeline)
+    # Transcription avec timestamps
     result = pipe(
         audio_input,
-        return_timestamps=True,  # Passé directement, pas dans generate_kwargs
-        generate_kwargs=generate_kwargs,  # Dict vide si pas de langue
+        return_timestamps=True,
+        generate_kwargs=generate_kwargs,
         chunk_length_s=30,
         batch_size=8
     )
     
-    update_job_status(progress=45)
+    update_job_status(progress=40)
     
     # Debug: afficher la structure du résultat
     logger.info(f"Whisper result keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
     
-    # Formater les segments
-    segments = []
+    # Formater et filtrer les segments
+    raw_segments = []
     if "chunks" in result:
-        logger.info(f"Found {len(result['chunks'])} chunks in result")
+        logger.info(f"Found {len(result['chunks'])} chunks bruts dans le résultat")
         for chunk in result["chunks"]:
             if chunk.get("timestamp"):
                 start, end = chunk["timestamp"]
                 if start is not None and end is not None:
-                    segments.append({
+                    raw_segments.append({
                         "start": round(start, 3),
                         "end": round(end, 3),
                         "text": chunk["text"].strip()
@@ -578,13 +907,64 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     else:
         logger.warning("No 'chunks' found in Whisper result - segments will be empty")
     
-    full_text = result.get("text", "").strip()
-    update_job_status(progress=50, transcription_segments=len(segments))
-    logger.info(f"Transcription terminée: {len(full_text)} caractères, {len(segments)} segments")
+    update_job_status(progress=45, raw_segments=len(raw_segments))
+    
+    # === FILTRAGE QUALITÉ ===
+    logger.info("Application du filtrage qualité des segments...")
+    
+    filtered_segments = []
+    rejected_count = 0
+    cleaned_count = 0
+    
+    for seg in raw_segments:
+        original_text = seg["text"]
+        
+        # 1. Valider le segment
+        is_valid, rejection_reason = validate_segment(seg)
+        if not is_valid:
+            logger.debug(f"Segment rejeté ({rejection_reason}): '{original_text[:50]}...'")
+            rejected_count += 1
+            continue
+        
+        # 2. Nettoyer le texte (supprime loops partiels, hallucinations)
+        cleaned_text = clean_segment_text(original_text)
+        
+        # Si le nettoyage a significativement modifié le texte, log it
+        if cleaned_text != original_text:
+            logger.debug(f"Segment nettoyé: '{original_text[:40]}' -> '{cleaned_text[:40]}'")
+            cleaned_count += 1
+        
+        # Rejeter si le nettoyage a vidé le segment
+        if len(cleaned_text.strip()) < QUALITY_THRESHOLDS["min_segment_chars"]:
+            rejected_count += 1
+            continue
+        
+        filtered_segments.append({
+            "start": seg["start"],
+            "end": seg["end"],
+            "text": cleaned_text
+        })
+    
+    logger.info(f"Filtrage qualité: {len(raw_segments)} bruts -> {len(filtered_segments)} gardés "
+               f"({rejected_count} rejetés, {cleaned_count} nettoyés)")
+    
+    # Reconstruire le texte complet à partir des segments filtrés
+    full_text = " ".join(seg["text"] for seg in filtered_segments)
+    
+    # Appliquer un nettoyage final au texte complet
+    full_text = clean_segment_text(full_text)
+    
+    update_job_status(
+        progress=50, 
+        transcription_segments=len(filtered_segments),
+        rejected_segments=rejected_count,
+        cleaned_segments=cleaned_count
+    )
+    logger.info(f"Transcription terminée: {len(full_text)} caractères, {len(filtered_segments)} segments")
     
     return {
         "text": full_text,
-        "segments": segments
+        "segments": filtered_segments
     }
 
 
