@@ -285,7 +285,6 @@ QUALITY_THRESHOLDS = {
 WHISPER_GENERATE_KWARGS = {
     "no_repeat_ngram_size": 3,         # Empêche répétition de n-grams
     "num_beams": 5,                    # Beam search pour meilleure qualité
-    "patience": 2.0,                   # Plus de patience dans le beam search
 }
 
 # Temperature fallback (commence à 0, monte si échec)
