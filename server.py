@@ -3,9 +3,11 @@ Remote Processing Service - Transcription + Diarization
 Optimisé pour AMD ROCm avec mémoire unifiée
 
 Endpoints:
-    POST /process - Transcription + Diarization combinées
-    POST /diarize - Diarization seule (rétrocompatibilité)
-    GET /health   - Status détaillé du service
+    POST /process   - Transcription + Diarization combinées
+    POST /diarize   - Diarization seule (rétrocompatibilité)
+    POST /transcribe - Transcription seule
+    GET /health     - Status détaillé du service
+    GET /status     - Status du job en cours (toujours disponible)
 """
 
 import os
@@ -13,9 +15,14 @@ import shutil
 import logging
 import tempfile
 import warnings
+import asyncio
+import threading
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 # Filtrer les warnings répétitifs de ROCm/HIP
 warnings.filterwarnings("ignore", message=".*bgemm_internal_cublaslt.*")
@@ -222,6 +229,97 @@ pyannote_pipeline = None
 device = None
 hf_token_loaded = None
 
+# ============================================================================
+# État global du job en cours (pour multi-threading et status)
+# ============================================================================
+
+@dataclass
+class JobStatus:
+    """État du job en cours de traitement."""
+    busy: bool = False
+    job_id: Optional[str] = None
+    filename: Optional[str] = None
+    stage: str = "idle"  # idle, uploading, transcribing, diarizing, merging, completed, error
+    progress: float = 0.0  # 0-100
+    started_at: Optional[datetime] = None
+    stage_started_at: Optional[datetime] = None
+    transcription_segments: int = 0
+    diarization_segments: int = 0
+    error_message: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+# Instance globale du status
+current_job = JobStatus()
+job_lock = threading.Lock()
+
+def update_job_status(
+    busy: Optional[bool] = None,
+    job_id: Optional[str] = None,
+    filename: Optional[str] = None,
+    stage: Optional[str] = None,
+    progress: Optional[float] = None,
+    transcription_segments: Optional[int] = None,
+    diarization_segments: Optional[int] = None,
+    error_message: Optional[str] = None,
+    **details
+):
+    """Met à jour l'état du job en cours (thread-safe)."""
+    global current_job
+    with job_lock:
+        if busy is not None:
+            current_job.busy = busy
+            if busy:
+                current_job.started_at = datetime.now()
+            else:
+                current_job.started_at = None
+        if job_id is not None:
+            current_job.job_id = job_id
+        if filename is not None:
+            current_job.filename = filename
+        if stage is not None:
+            current_job.stage = stage
+            current_job.stage_started_at = datetime.now()
+        if progress is not None:
+            current_job.progress = progress
+        if transcription_segments is not None:
+            current_job.transcription_segments = transcription_segments
+        if diarization_segments is not None:
+            current_job.diarization_segments = diarization_segments
+        if error_message is not None:
+            current_job.error_message = error_message
+        if details:
+            current_job.details.update(details)
+
+def reset_job_status():
+    """Réinitialise l'état du job."""
+    global current_job
+    with job_lock:
+        current_job = JobStatus()
+
+def get_job_status_dict() -> dict:
+    """Retourne l'état du job sous forme de dict (thread-safe)."""
+    with job_lock:
+        elapsed = None
+        stage_elapsed = None
+        if current_job.started_at:
+            elapsed = (datetime.now() - current_job.started_at).total_seconds()
+        if current_job.stage_started_at:
+            stage_elapsed = (datetime.now() - current_job.stage_started_at).total_seconds()
+        
+        return {
+            "busy": current_job.busy,
+            "job_id": current_job.job_id,
+            "filename": current_job.filename,
+            "stage": current_job.stage,
+            "progress": current_job.progress,
+            "elapsed_seconds": elapsed,
+            "stage_elapsed_seconds": stage_elapsed,
+            "transcription_segments": current_job.transcription_segments,
+            "diarization_segments": current_job.diarization_segments,
+            "error_message": current_job.error_message,
+            "details": current_job.details.copy()
+        }
+
 
 # ============================================================================
 # Modèles Pydantic
@@ -261,6 +359,22 @@ class HealthResponse(BaseModel):
     memory_total_gb: Optional[float]
     memory_available_gb: Optional[float]
     models_loaded: dict
+    busy: bool = False
+    current_job: Optional[dict] = None
+
+
+class StatusResponse(BaseModel):
+    busy: bool
+    job_id: Optional[str]
+    filename: Optional[str]
+    stage: str
+    progress: float
+    elapsed_seconds: Optional[float]
+    stage_elapsed_seconds: Optional[float]
+    transcription_segments: int
+    diarization_segments: int
+    error_message: Optional[str]
+    details: dict
 
 
 # ============================================================================
@@ -401,8 +515,17 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     from transformers import pipeline
     import librosa
     
+    update_job_status(stage="transcribing", progress=5)
+    
     # Charger l'audio avec librosa (évite torchcodec)
+    logger.info("Chargement de l'audio...")
+    update_job_status(progress=10, audio_loading=True)
     audio_array, sample_rate = librosa.load(audio_path, sr=16000)
+    
+    # Calculer la durée pour l'estimation
+    duration_seconds = len(audio_array) / sample_rate
+    update_job_status(progress=15, audio_duration_seconds=round(duration_seconds, 1))
+    logger.info(f"Audio chargé: {duration_seconds:.1f} secondes")
     
     # Créer le pipeline de transcription
     pipe = pipeline(
@@ -422,6 +545,9 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
     # Passer l'audio comme dict pour éviter que le pipeline essaie de le charger
     audio_input = {"array": audio_array, "sampling_rate": sample_rate}
     
+    update_job_status(progress=20)
+    logger.info("Transcription en cours...")
+    
     # Transcription avec timestamps (return_timestamps doit être passé directement au pipeline)
     result = pipe(
         audio_input,
@@ -430,6 +556,8 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
         chunk_length_s=30,
         batch_size=8
     )
+    
+    update_job_status(progress=45)
     
     # Debug: afficher la structure du résultat
     logger.info(f"Whisper result keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
@@ -451,6 +579,7 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
         logger.warning("No 'chunks' found in Whisper result - segments will be empty")
     
     full_text = result.get("text", "").strip()
+    update_job_status(progress=50, transcription_segments=len(segments))
     logger.info(f"Transcription terminée: {len(full_text)} caractères, {len(segments)} segments")
     
     return {
@@ -463,6 +592,9 @@ def diarize_audio(audio_path: str, min_speakers: Optional[int] = None,
                   max_speakers: Optional[int] = None) -> List[dict]:
     """Effectue la diarization avec Pyannote."""
     global pyannote_pipeline
+    
+    update_job_status(stage="diarizing", progress=55)
+    logger.info("Diarization en cours (peut prendre plusieurs minutes)...")
     
     params = {}
     if min_speakers:
@@ -477,11 +609,14 @@ def diarize_audio(audio_path: str, min_speakers: Optional[int] = None,
         if "miopenStatus" in str(e) or "MIOpen" in str(e):
             logger.warning(f"Erreur MIOpen détectée: {e}")
             logger.warning("Basculement automatique de Pyannote sur CPU...")
+            update_job_status(pyannote_fallback_cpu=True)
             _fallback_pyannote_to_cpu()
             # Réessayer sur CPU
             diarization = pyannote_pipeline(audio_path, **params)
         else:
             raise
+    
+    update_job_status(progress=85)
     
     segments = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
@@ -491,7 +626,11 @@ def diarize_audio(audio_path: str, min_speakers: Optional[int] = None,
             "speaker": speaker  # str comme "SPEAKER_00"
         })
     
-    logger.info(f"Diarization terminée: {len(segments)} segments de locuteurs détectés")
+    # Compter les speakers uniques
+    unique_speakers = len(set(seg["speaker"] for seg in segments))
+    update_job_status(progress=90, diarization_segments=len(segments), speakers_detected=unique_speakers)
+    
+    logger.info(f"Diarization terminée: {len(segments)} segments, {unique_speakers} locuteurs détectés")
     if not segments:
         logger.warning("Aucun locuteur détecté - le fichier audio est peut-être trop court ou silencieux")
     
@@ -653,8 +792,12 @@ app = FastAPI(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Retourne l'état détaillé du service."""
+    """
+    Retourne l'état détaillé du service.
+    Répond toujours, même pendant un traitement en cours.
+    """
     device_info = get_device_info()
+    job_status = get_job_status_dict()
     
     return HealthResponse(
         status="ok",
@@ -666,8 +809,78 @@ async def health_check():
         models_loaded={
             "whisper": whisper_model is not None,
             "pyannote": pyannote_pipeline is not None
-        }
+        },
+        busy=job_status["busy"],
+        current_job=job_status if job_status["busy"] else None
     )
+
+
+@app.get("/status", response_model=StatusResponse)
+async def get_status():
+    """
+    Retourne le status détaillé du job en cours.
+    Répond toujours instantanément.
+    """
+    status = get_job_status_dict()
+    return StatusResponse(**status)
+
+
+def _do_process_sync(
+    temp_file: str,
+    hf_token: str,
+    language: Optional[str],
+    min_speakers: Optional[int],
+    max_speakers: Optional[int],
+    skip_diarization: bool
+) -> dict:
+    """
+    Traitement synchrone (exécuté dans un thread séparé).
+    Permet au health check de répondre pendant le traitement.
+    """
+    # Charger Pyannote si nécessaire (et si diarization demandée)
+    if not skip_diarization:
+        load_pyannote_model(hf_token)
+    
+    # 1. Transcription
+    logger.info("Début transcription...")
+    transcription_result = transcribe_audio(temp_file, language)
+    logger.info(f"Transcription terminée: {len(transcription_result['segments'])} segments")
+    
+    # 2. Diarization (optionnelle)
+    diarization_segments = []
+    if not skip_diarization:
+        logger.info("Début diarization...")
+        diarization_segments = diarize_audio(temp_file, min_speakers, max_speakers)
+        logger.info(f"Diarization terminée: {len(diarization_segments)} segments")
+    
+    # 3. Fusion
+    update_job_status(stage="merging", progress=92)
+    if diarization_segments:
+        merged_segments = merge_transcription_diarization(
+            transcription_result["segments"],
+            diarization_segments
+        )
+    else:
+        # Sans diarization, on met un speaker par défaut
+        merged_segments = [
+            {
+                "start": seg["start"],
+                "end": seg["end"],
+                "speaker": "SPEAKER_00",
+                "text": seg["text"]
+            }
+            for seg in transcription_result["segments"]
+        ]
+    
+    update_job_status(stage="completed", progress=100)
+    logger.info("Traitement terminé avec succès")
+    
+    return {
+        "text": transcription_result["text"],
+        "segments": merged_segments,
+        "transcription_segments": transcription_result["segments"],
+        "diarization_segments": diarization_segments
+    }
 
 
 @app.post("/process")
@@ -682,6 +895,9 @@ async def process_audio(
     """
     Endpoint principal: Transcription + Diarization combinées.
     
+    Le traitement s'exécute dans un thread séparé pour permettre
+    au endpoint /health et /status de répondre pendant le traitement.
+    
     Args:
         file: Fichier audio (WAV, MP3, OGG, etc.)
         hf_token: Token Hugging Face (requis pour Pyannote)
@@ -693,69 +909,61 @@ async def process_audio(
     Returns:
         JSON avec text, segments fusionnés, et segments bruts
     """
+    # Vérifier si déjà occupé
+    if current_job.busy:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Service occupé",
+                "message": f"Un traitement est déjà en cours: {current_job.filename}",
+                "current_job": get_job_status_dict()
+            }
+        )
+    
     temp_file = None
+    job_id = str(uuid.uuid4())[:8]
     
     try:
+        # Marquer comme occupé
+        update_job_status(
+            busy=True,
+            job_id=job_id,
+            filename=file.filename,
+            stage="uploading",
+            progress=0,
+            transcription_segments=0,
+            diarization_segments=0,
+            error_message=None
+        )
+        
         # Sauvegarder le fichier
-        logger.info(f"Réception fichier: {file.filename}")
+        logger.info(f"[{job_id}] Réception fichier: {file.filename}")
         temp_file = save_upload_file(file)
-        logger.info(f"Fichier sauvegardé: {temp_file}")
+        logger.info(f"[{job_id}] Fichier sauvegardé: {temp_file}")
         
-        # Charger Pyannote si nécessaire (et si diarization demandée)
-        if not skip_diarization:
-            try:
-                load_pyannote_model(hf_token)
-            except Exception as e:
-                logger.error(f"Erreur chargement Pyannote: {e}")
-                return JSONResponse(
-                    status_code=500,
-                    content={"error": f"Échec chargement Pyannote. Vérifiez le token HF. Erreur: {str(e)}"}
-                )
+        update_job_status(stage="loading", progress=2)
         
-        # 1. Transcription
-        logger.info("Début transcription...")
-        transcription_result = transcribe_audio(temp_file, language)
-        logger.info(f"Transcription terminée: {len(transcription_result['segments'])} segments")
+        # Exécuter le traitement dans un thread séparé
+        # Cela permet au health check de répondre pendant le traitement
+        result = await asyncio.to_thread(
+            _do_process_sync,
+            temp_file,
+            hf_token,
+            language,
+            min_speakers,
+            max_speakers,
+            skip_diarization
+        )
         
-        # 2. Diarization (optionnelle)
-        diarization_segments = []
-        if not skip_diarization:
-            logger.info("Début diarization...")
-            diarization_segments = diarize_audio(temp_file, min_speakers, max_speakers)
-            logger.info(f"Diarization terminée: {len(diarization_segments)} segments")
-        
-        # 3. Fusion
-        if diarization_segments:
-            merged_segments = merge_transcription_diarization(
-                transcription_result["segments"],
-                diarization_segments
-            )
-        else:
-            # Sans diarization, on met un speaker par défaut
-            merged_segments = [
-                {
-                    "start": seg["start"],
-                    "end": seg["end"],
-                    "speaker": "SPEAKER_00",
-                    "text": seg["text"]
-                }
-                for seg in transcription_result["segments"]
-            ]
-        
-        logger.info("Traitement terminé avec succès")
-        
-        return JSONResponse(content={
-            "text": transcription_result["text"],
-            "segments": merged_segments,
-            "transcription_segments": transcription_result["segments"],
-            "diarization_segments": diarization_segments
-        })
+        return JSONResponse(content=result)
         
     except Exception as e:
-        logger.error(f"Erreur traitement: {e}", exc_info=True)
+        error_msg = str(e)
+        logger.error(f"[{job_id}] Erreur traitement: {e}", exc_info=True)
+        update_job_status(stage="error", error_message=error_msg)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Erreur traitement: {str(e)}"}
+            content={"error": f"Erreur traitement: {error_msg}"}
         )
     
     finally:
@@ -763,9 +971,21 @@ async def process_audio(
         if temp_file and os.path.exists(temp_file):
             try:
                 os.unlink(temp_file)
-                logger.debug(f"Fichier temporaire supprimé: {temp_file}")
+                logger.debug(f"[{job_id}] Fichier temporaire supprimé: {temp_file}")
             except Exception as e:
-                logger.warning(f"Impossible de supprimer {temp_file}: {e}")
+                logger.warning(f"[{job_id}] Impossible de supprimer {temp_file}: {e}")
+        
+        # Réinitialiser le status après un court délai (pour que le frontend puisse voir "completed")
+        await asyncio.sleep(2)
+        reset_job_status()
+
+
+def _do_diarize_sync(temp_file: str, hf_token: str, min_speakers: Optional[int], max_speakers: Optional[int]) -> List[dict]:
+    """Diarization synchrone dans un thread séparé."""
+    load_pyannote_model(hf_token)
+    segments = diarize_audio(temp_file, min_speakers, max_speakers)
+    update_job_status(stage="completed", progress=100)
+    return segments
 
 
 @app.post("/diarize")
@@ -777,31 +997,46 @@ async def diarize_only(
 ):
     """
     Endpoint de rétrocompatibilité: Diarization seule.
-    
-    Retourne le même format que l'ancienne API.
+    Exécuté dans un thread séparé pour ne pas bloquer le health check.
     """
+    if current_job.busy:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Service occupé",
+                "message": f"Un traitement est déjà en cours: {current_job.filename}",
+                "current_job": get_job_status_dict()
+            }
+        )
+    
     temp_file = None
+    job_id = str(uuid.uuid4())[:8]
     
     try:
-        # Sauvegarder le fichier
+        update_job_status(
+            busy=True,
+            job_id=job_id,
+            filename=file.filename,
+            stage="uploading",
+            progress=0
+        )
+        
         temp_file = save_upload_file(file)
+        update_job_status(stage="loading", progress=5)
         
-        # Charger Pyannote
-        try:
-            load_pyannote_model(hf_token)
-        except Exception as e:
-            return JSONResponse(
-                status_code=500,
-                content={"error": f"Échec chargement pipeline. Vérifiez le token HF. Erreur: {str(e)}"}
-            )
-        
-        # Diarization
-        segments = diarize_audio(temp_file, min_speakers, max_speakers)
+        segments = await asyncio.to_thread(
+            _do_diarize_sync,
+            temp_file,
+            hf_token,
+            min_speakers,
+            max_speakers
+        )
         
         return JSONResponse(content={"segments": segments})
         
     except Exception as e:
-        logger.error(f"Erreur diarization: {e}", exc_info=True)
+        logger.error(f"[{job_id}] Erreur diarization: {e}", exc_info=True)
+        update_job_status(stage="error", error_message=str(e))
         return JSONResponse(
             status_code=500,
             content={"error": f"Diarization échouée: {str(e)}"}
@@ -813,6 +1048,15 @@ async def diarize_only(
                 os.unlink(temp_file)
             except Exception:
                 pass
+        await asyncio.sleep(2)
+        reset_job_status()
+
+
+def _do_transcribe_sync(temp_file: str, language: Optional[str]) -> dict:
+    """Transcription synchrone dans un thread séparé."""
+    result = transcribe_audio(temp_file, language)
+    update_job_status(stage="completed", progress=100)
+    return result
 
 
 @app.post("/transcribe")
@@ -822,15 +1066,39 @@ async def transcribe_only(
 ):
     """
     Endpoint: Transcription seule (sans diarization).
-    
     Ne nécessite pas de token HF.
+    Exécuté dans un thread séparé pour ne pas bloquer le health check.
     """
+    if current_job.busy:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Service occupé",
+                "message": f"Un traitement est déjà en cours: {current_job.filename}",
+                "current_job": get_job_status_dict()
+            }
+        )
+    
     temp_file = None
+    job_id = str(uuid.uuid4())[:8]
     
     try:
-        temp_file = save_upload_file(file)
+        update_job_status(
+            busy=True,
+            job_id=job_id,
+            filename=file.filename,
+            stage="uploading",
+            progress=0
+        )
         
-        result = transcribe_audio(temp_file, language)
+        temp_file = save_upload_file(file)
+        update_job_status(stage="loading", progress=2)
+        
+        result = await asyncio.to_thread(
+            _do_transcribe_sync,
+            temp_file,
+            language
+        )
         
         return JSONResponse(content={
             "text": result["text"],
@@ -838,7 +1106,8 @@ async def transcribe_only(
         })
         
     except Exception as e:
-        logger.error(f"Erreur transcription: {e}", exc_info=True)
+        logger.error(f"[{job_id}] Erreur transcription: {e}", exc_info=True)
+        update_job_status(stage="error", error_message=str(e))
         return JSONResponse(
             status_code=500,
             content={"error": f"Transcription échouée: {str(e)}"}
@@ -850,3 +1119,5 @@ async def transcribe_only(
                 os.unlink(temp_file)
             except Exception:
                 pass
+        await asyncio.sleep(2)
+        reset_job_status()

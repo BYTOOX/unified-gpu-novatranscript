@@ -2,17 +2,23 @@
 
 Service unifié de **transcription** (Whisper) + **diarization** (Pyannote) optimisé pour **AMD ROCm**.
 
+**Nouvelles fonctionnalités v2.1 :**
+- ⚡ Multi-threading : les endpoints `/health` et `/status` répondent même pendant un traitement
+- 📊 Status en temps réel : progression, étape en cours, segments générés
+- 🔒 Protection contre les requêtes simultanées (503 si déjà occupé)
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Distrobox (llama-rocm-7.1.1)                               │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  FastAPI Server (uvicorn)                           │    │
+│  │  FastAPI Server (uvicorn + asyncio.to_thread)       │    │
 │  │  ├── /process   → Whisper + Pyannote combinés       │    │
 │  │  ├── /transcribe → Whisper seul                     │    │
 │  │  ├── /diarize   → Pyannote seul (rétrocompat)       │    │
-│  │  └── /health    → Status détaillé                   │    │
+│  │  ├── /health    → Status détaillé + job en cours    │    │
+│  │  └── /status    → Status job uniquement (léger)     │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                          ↓                                  │
 │  ┌─────────────────────────────────────────────────────┐    │
@@ -74,7 +80,7 @@ Le serveur écoute sur `http://0.0.0.0:8000` par défaut.
 ## Endpoints
 
 ### `GET /health`
-Retourne l'état du service.
+Retourne l'état du service. **Répond toujours**, même pendant un traitement en cours.
 
 ```json
 {
@@ -87,12 +93,62 @@ Retourne l'état du service.
   "models_loaded": {
     "whisper": true,
     "pyannote": true
+  },
+  "busy": true,
+  "current_job": {
+    "busy": true,
+    "job_id": "a1b2c3d4",
+    "filename": "interview.mp3",
+    "stage": "transcribing",
+    "progress": 35.0,
+    "elapsed_seconds": 45.2,
+    "stage_elapsed_seconds": 20.1,
+    "transcription_segments": 0,
+    "diarization_segments": 0,
+    "error_message": null,
+    "details": {"audio_duration_seconds": 180.5}
   }
 }
 ```
 
+### `GET /status`
+Retourne uniquement le status du job en cours (plus léger que `/health`). Idéal pour le polling fréquent.
+
+```json
+{
+  "busy": true,
+  "job_id": "a1b2c3d4",
+  "filename": "interview.mp3",
+  "stage": "diarizing",
+  "progress": 75.0,
+  "elapsed_seconds": 120.5,
+  "stage_elapsed_seconds": 45.3,
+  "transcription_segments": 42,
+  "diarization_segments": 15,
+  "error_message": null,
+  "details": {
+    "audio_duration_seconds": 180.5,
+    "speakers_detected": 3
+  }
+}
+```
+
+**Stages possibles :**
+| Stage | Description |
+|-------|-------------|
+| `idle` | En attente |
+| `uploading` | Réception du fichier |
+| `loading` | Chargement des modèles |
+| `transcribing` | Transcription Whisper en cours |
+| `diarizing` | Diarization Pyannote en cours |
+| `merging` | Fusion des segments |
+| `completed` | Terminé avec succès |
+| `error` | Erreur (voir `error_message`) |
+
 ### `POST /process` (recommandé)
 Transcription + Diarization combinées.
+
+> ⚠️ **Protection anti-concurrence** : Si un traitement est déjà en cours, retourne `503 Service Unavailable` avec le status du job actuel.
 
 **Paramètres (form-data) :**
 | Param | Type | Requis | Description |
@@ -104,7 +160,7 @@ Transcription + Diarization combinées.
 | `max_speakers` | int | | Nombre maximum de locuteurs |
 | `skip_diarization` | bool | | Si true, transcription seule |
 
-**Réponse :**
+**Réponse (succès) :**
 ```json
 {
   "text": "Transcription complète...",
@@ -113,6 +169,15 @@ Transcription + Diarization combinées.
   ],
   "transcription_segments": [...],
   "diarization_segments": [...]
+}
+```
+
+**Réponse (503 - déjà occupé) :**
+```json
+{
+  "error": "Service occupé",
+  "message": "Un traitement est déjà en cours: interview.mp3",
+  "current_job": {...}
 }
 ```
 
