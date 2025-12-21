@@ -220,6 +220,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Filtre pour supprimer les logs des endpoints de polling (/status, /health)
+class PollingEndpointFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        # Supprimer les logs uvicorn pour /status et /health
+        if '/status' in message or '/health' in message:
+            return False
+        return True
+
+# Appliquer le filtre au logger uvicorn.access
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.addFilter(PollingEndpointFilter())
+
 # ============================================================================
 # Configuration globale
 # ============================================================================
