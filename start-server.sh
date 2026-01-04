@@ -72,6 +72,32 @@ check_distrobox() {
     fi
 }
 
+# Configurer l'environnement (créer venv, installer Python si nécessaire)
+setup_environment() {
+    log_info "Configuration de l'environnement..."
+    
+    # Vérifier/installer Python dans distrobox
+    distrobox enter "$DISTROBOX_NAME" -- bash -c "
+        if ! command -v python3 &> /dev/null; then
+            echo '[INFO] Installation de Python 3...'
+            sudo dnf install -y python3 python3-pip python3-devel
+        else
+            echo '[INFO] Python 3 déjà installé'
+        fi
+        
+        # Créer le venv s'il n'existe pas
+        if [ ! -d '$VENV_PATH' ]; then
+            echo '[INFO] Création du venv: $VENV_PATH'
+            sudo python3 -m venv '$VENV_PATH'
+            sudo chown -R \$(whoami):\$(whoami) '$VENV_PATH'
+        else
+            echo '[INFO] Venv déjà existant: $VENV_PATH'
+        fi
+    "
+    
+    log_info "Environnement configuré"
+}
+
 # Installer les dépendances
 install_deps() {
     log_info "Installation des dépendances Python dans le venv..."
@@ -79,7 +105,18 @@ install_deps() {
     log_info "Venv: $VENV_PATH"
     
     run_in_venv "pip install --upgrade pip"
-    run_in_venv "pip install -r $SCRIPT_DIR/requirements.txt"
+    
+    # Installer onnxruntime-rocm AVANT silero-vad pour éviter le conflit de dépendances
+    log_info "Installation de onnxruntime-rocm (requis pour silero-vad sur AMD ROCm)..."
+    run_in_venv "pip install onnxruntime-rocm" || log_warn "onnxruntime-rocm non disponible, silero-vad sera désactivé"
+    
+    # Installer silero-vad sans ses dépendances (onnxruntime-rocm le remplace)
+    log_info "Installation de silero-vad (--no-deps pour utiliser onnxruntime-rocm)..."
+    run_in_venv "pip install --no-deps silero-vad>=5.1" || log_warn "silero-vad non installé"
+    
+    # Installer le reste des dépendances (sans silero-vad qui est déjà installé)
+    log_info "Installation des autres dépendances..."
+    run_in_venv "pip install -r $SCRIPT_DIR/requirements.txt --ignore-installed silero-vad"
     
     log_info "Dépendances installées avec succès"
 }
@@ -143,6 +180,11 @@ stop_server() {
 # Main
 main() {
     case "${1:-}" in
+        --setup)
+            check_distrobox
+            setup_environment
+            install_deps
+            ;;
         --install)
             check_distrobox
             install_deps
@@ -155,10 +197,11 @@ main() {
             stop_server
             ;;
         --help|-h)
-            echo "Usage: $0 [--install|--background|--stop|--help]"
+            echo "Usage: $0 [--setup|--install|--background|--stop|--help]"
             echo ""
             echo "Options:"
-            echo "  --install     Installer les dépendances Python"
+            echo "  --setup       Configurer l'environnement (créer venv, installer Python) + dépendances"
+            echo "  --install     Installer les dépendances Python (venv doit exister)"
             echo "  --background  Démarrer le serveur en arrière-plan"
             echo "  --stop        Arrêter le serveur en arrière-plan"
             echo "  --help        Afficher cette aide"

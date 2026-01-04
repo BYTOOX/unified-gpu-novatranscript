@@ -54,13 +54,18 @@ distrobox create -n llama-rocm-7.1.1 \
 ## Installation
 
 ```bash
-# 1. Installer les dépendances
+# 1. Configuration complète (crée le venv, installe Python si nécessaire, installe les dépendances)
+./start-server.sh --setup
+
+# OU si le venv existe déjà :
 ./start-server.sh --install
 
 # 2. Vérifier l'accès GPU
 distrobox enter llama-rocm-7.1.1 -- python3 -c "import torch; print(torch.cuda.is_available())"
 # Doit afficher: True
 ```
+
+> **Note ROCm/AMD :** Le script installe automatiquement `onnxruntime-rocm` avant `silero-vad` pour éviter les conflits de dépendances avec `onnxruntime` standard qui n'est pas compatible ROCm.
 
 ## Démarrage
 

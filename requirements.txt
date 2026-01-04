@@ -52,4 +52,8 @@ librosa
 soundfile
 
 # VAD pour filtrer les silences (prévention hallucinations Whisper)
+# IMPORTANT: Sur ROCm, installer onnxruntime-rocm AVANT silero-vad:
+#   pip install onnxruntime-rocm
+#   pip install --no-deps silero-vad
+# Cela évite le conflit car silero-vad demande onnxruntime (pas onnxruntime-rocm)
 silero-vad>=5.1
