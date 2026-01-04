@@ -1680,7 +1680,12 @@ async def process_audio(
             skip_diarization
         )
         
-        return JSONResponse(content=result)
+        # Log la taille de la réponse avant envoi
+        result_json = JSONResponse(content=result)
+        result_size = len(result.get('text', '')) + sum(len(str(s)) for s in result.get('segments', []))
+        logger.info(f"[{job_id}] Sending HTTP 200 response (~{result_size} chars, {len(result.get('segments', []))} segments)")
+        
+        return result_json
         
     except Exception as e:
         error_msg = str(e)
@@ -1700,9 +1705,12 @@ async def process_audio(
             except Exception as e:
                 logger.warning(f"[{job_id}] Impossible de supprimer {temp_file}: {e}")
         
-        # Réinitialiser le status après un court délai (pour que le frontend puisse voir "completed")
-        await asyncio.sleep(2)
+        # Réinitialiser le status après un délai plus long
+        # pour permettre au client de recevoir la réponse HTTP
+        logger.info(f"[{job_id}] Response sent, will reset status in 10 seconds")
+        await asyncio.sleep(10)
         reset_job_status()
+        logger.info(f"[{job_id}] Status reset to idle")
 
 
 def _do_diarize_sync(temp_file: str, hf_token: str, min_speakers: Optional[int], max_speakers: Optional[int]) -> List[dict]:
