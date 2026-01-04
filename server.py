@@ -35,20 +35,43 @@ import torch
 # Monkey-patches pour compatibilité PyTorch 2.6+ et torchaudio >= 2.0 avec ROCm
 # ============================================================================
 
-# Patch pour PyTorch 2.6+: autoriser le chargement des modèles Pyannote
+# Patch contextuel pour PyTorch 2.6+: autoriser le chargement des modèles Pyannote
 # PyTorch 2.6 a changé weights_only=True par défaut, ce qui casse Pyannote
-# lightning_fabric passe explicitement weights_only=True, donc on doit forcer False
+# Ce patch est activé uniquement dans le contexte de chargement de PyAnnote
 import torch.serialization
+from contextlib import contextmanager
 
 _original_torch_load = torch.load
+_pyannote_load_context_active = False
 
 def _patched_torch_load(*args, **kwargs):
-    # Forcer weights_only=False pour tous les appels
-    # Nécessaire car Pyannote/lightning passent explicitement weights_only=True
-    kwargs['weights_only'] = False
+    """
+    Patch conditionnel de torch.load.
+    Force weights_only=False uniquement si le contexte PyAnnote est actif.
+    """
+    global _pyannote_load_context_active
+    if _pyannote_load_context_active:
+        # Dans le contexte PyAnnote: forcer weights_only=False
+        kwargs['weights_only'] = False
     return _original_torch_load(*args, **kwargs)
 
 torch.load = _patched_torch_load
+
+@contextmanager
+def pyannote_load_context():
+    """
+    Context manager qui active le patch torch.load pour PyAnnote.
+    
+    Usage:
+        with pyannote_load_context():
+            pipeline = Pipeline.from_pretrained(...)
+    """
+    global _pyannote_load_context_active
+    _pyannote_load_context_active = True
+    try:
+        yield
+    finally:
+        _pyannote_load_context_active = False
 
 import torchaudio
 
@@ -281,6 +304,10 @@ device = None
 hf_token_loaded = None
 silero_vad_model = None  # Chargé à la demande
 
+# État du smoke test GPU pour PyAnnote
+pyannote_gpu_smoke_test_passed = False
+pyannote_gpu_smoke_test_reason = "not_tested"
+
 # ============================================================================
 # Configuration qualité transcription
 # ============================================================================
@@ -460,6 +487,9 @@ class HealthResponse(BaseModel):
     gpu_name: Optional[str]
     memory_total_gb: Optional[float]
     memory_available_gb: Optional[float]
+    rocm: bool = False
+    pyannote_gpu_ok: bool = False
+    pyannote_gpu_reason: Optional[str] = None
     models_loaded: dict
     busy: bool = False
     current_job: Optional[dict] = None
@@ -490,20 +520,31 @@ def get_device_info() -> dict:
         "device": "cpu",
         "gpu_name": None,
         "memory_total_gb": None,
-        "memory_available_gb": None
+        "memory_available_gb": None,
+        "rocm": False,
+        "pyannote_gpu_ok": pyannote_gpu_smoke_test_passed,
+        "pyannote_gpu_reason": pyannote_gpu_smoke_test_reason
     }
     
     if torch.cuda.is_available():
         info["device"] = "cuda"
+        info["rocm"] = detect_rocm()
         try:
             info["gpu_name"] = torch.cuda.get_device_name(0)
-            # Mémoire en GB
-            props = torch.cuda.get_device_properties(0)
-            info["memory_total_gb"] = round(props.total_memory / (1024**3), 2)
             
-            # Mémoire disponible
-            free_memory = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
-            info["memory_available_gb"] = round(free_memory / (1024**3), 2)
+            # Utiliser mem_get_info pour obtenir la vraie mémoire disponible
+            # (au lieu de memory_reserved - memory_allocated qui est faux)
+            try:
+                free_memory, total_memory = torch.cuda.mem_get_info(0)
+                info["memory_total_gb"] = round(total_memory / (1024**3), 2)
+                info["memory_available_gb"] = round(free_memory / (1024**3), 2)
+            except (AttributeError, RuntimeError):
+                # Fallback si mem_get_info n'est pas disponible
+                props = torch.cuda.get_device_properties(0)
+                info["memory_total_gb"] = round(props.total_memory / (1024**3), 2)
+                # Approximation: mémoire allouée par PyTorch
+                allocated = torch.cuda.memory_allocated(0)
+                info["memory_available_gb"] = round((props.total_memory - allocated) / (1024**3), 2)
         except Exception as e:
             logger.warning(f"Impossible de récupérer les infos GPU: {e}")
     
@@ -516,6 +557,132 @@ def detect_rocm() -> bool:
         # ROCm expose torch.version.hip
         return hasattr(torch.version, 'hip') and torch.version.hip is not None
     return False
+
+
+def run_pyannote_gpu_smoke_test() -> tuple:
+    """
+    Teste si le GPU peut exécuter les opérations critiques utilisées par PyAnnote.
+    
+    PyAnnote utilise notamment:
+    - matmul (attention layers)
+    - conv1d (SincNet encoder)
+    - InstanceNorm1d (normalisation - souvent problématique sur MIOpen/gfx1151)
+    
+    Returns:
+        (success: bool, reason: str)
+    """
+    global pyannote_gpu_smoke_test_passed, pyannote_gpu_smoke_test_reason
+    
+    if not torch.cuda.is_available():
+        pyannote_gpu_smoke_test_passed = False
+        pyannote_gpu_smoke_test_reason = "no_gpu"
+        return False, "no_gpu"
+    
+    try:
+        dev = torch.device("cuda")
+        
+        # Test 1: matmul (attention layers)
+        logger.info("  GPU Smoke Test: matmul...")
+        x = torch.randn(256, 256, device=dev, dtype=torch.float32)
+        y = torch.randn(256, 256, device=dev, dtype=torch.float32)
+        result = torch.matmul(x, y)
+        _ = result.sum().item()  # Force synchronisation
+        del x, y, result
+        
+        # Test 2: conv1d (SincNet encoder de PyAnnote)
+        logger.info("  GPU Smoke Test: conv1d...")
+        audio_sim = torch.randn(1, 1, 16000, device=dev, dtype=torch.float32)  # 1 sec audio
+        conv_weight = torch.randn(80, 1, 251, device=dev, dtype=torch.float32)  # SincNet-like
+        conv_result = torch.nn.functional.conv1d(audio_sim, conv_weight, padding=125)
+        _ = conv_result.sum().item()
+        del audio_sim, conv_weight, conv_result
+        
+        # Test 3: InstanceNorm1d (souvent problématique sur MIOpen/gfx1151)
+        logger.info("  GPU Smoke Test: InstanceNorm1d...")
+        norm_input = torch.randn(4, 64, 1000, device=dev, dtype=torch.float32)
+        instance_norm = torch.nn.InstanceNorm1d(64, affine=True).to(dev)
+        norm_result = instance_norm(norm_input)
+        _ = norm_result.sum().item()
+        del norm_input, instance_norm, norm_result
+        
+        # Test 4: BatchNorm1d (utilisé dans certaines couches)
+        logger.info("  GPU Smoke Test: BatchNorm1d...")
+        bn_input = torch.randn(4, 64, 1000, device=dev, dtype=torch.float32)
+        batch_norm = torch.nn.BatchNorm1d(64).to(dev)
+        batch_norm.eval()  # Mode eval pour éviter les problèmes de running stats
+        bn_result = batch_norm(bn_input)
+        _ = bn_result.sum().item()
+        del bn_input, batch_norm, bn_result
+        
+        # Test 5: LSTM (utilisé dans PyAnnote pour le speaker embedding)
+        logger.info("  GPU Smoke Test: LSTM...")
+        lstm = torch.nn.LSTM(input_size=64, hidden_size=128, num_layers=2, batch_first=True).to(dev)
+        lstm_input = torch.randn(4, 100, 64, device=dev, dtype=torch.float32)
+        lstm_output, _ = lstm(lstm_input)
+        _ = lstm_output.sum().item()
+        del lstm, lstm_input, lstm_output
+        
+        # Nettoyage mémoire GPU
+        torch.cuda.empty_cache()
+        
+        logger.info("  GPU Smoke Test: PASSED ✓")
+        pyannote_gpu_smoke_test_passed = True
+        pyannote_gpu_smoke_test_reason = "passed"
+        return True, "passed"
+        
+    except RuntimeError as e:
+        error_str = str(e)
+        torch.cuda.empty_cache()
+        
+        # Identifier le type d'erreur
+        if "miopenStatus" in error_str:
+            reason = f"miopen_error: {error_str[:100]}"
+        elif "HIP error" in error_str:
+            reason = f"hip_error: {error_str[:100]}"
+        elif "invalid device function" in error_str:
+            reason = "invalid_device_function"
+        else:
+            reason = f"runtime_error: {error_str[:100]}"
+        
+        logger.warning(f"  GPU Smoke Test: FAILED ✗ - {reason}")
+        pyannote_gpu_smoke_test_passed = False
+        pyannote_gpu_smoke_test_reason = reason
+        return False, reason
+        
+    except Exception as e:
+        torch.cuda.empty_cache()
+        reason = f"unexpected_error: {str(e)[:100]}"
+        logger.warning(f"  GPU Smoke Test: FAILED ✗ - {reason}")
+        pyannote_gpu_smoke_test_passed = False
+        pyannote_gpu_smoke_test_reason = reason
+        return False, reason
+
+
+def configure_rocm_backends():
+    """
+    Configure les backends PyTorch pour ROCm.
+    Désactive les kernels SDP (Scaled Dot Product) fused qui peuvent être instables.
+    """
+    if not detect_rocm():
+        return
+    
+    logger.info("ROCm détecté - Configuration des backends PyTorch...")
+    
+    # Désactiver Flash SDP et Memory Efficient SDP (expérimentaux sur ROCm)
+    # Ces backends peuvent causer des erreurs sur certains GPUs AMD
+    try:
+        if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+            torch.backends.cuda.enable_flash_sdp(False)
+            logger.info("  Flash SDP désactivé")
+        if hasattr(torch.backends.cuda, 'enable_mem_efficient_sdp'):
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            logger.info("  Memory Efficient SDP désactivé")
+        if hasattr(torch.backends.cuda, 'enable_math_sdp'):
+            # Garder le backend math activé (plus stable)
+            torch.backends.cuda.enable_math_sdp(True)
+            logger.info("  Math SDP activé (fallback stable)")
+    except Exception as e:
+        logger.warning(f"  Impossible de configurer les backends SDP: {e}")
 
 
 # ============================================================================
@@ -792,10 +959,12 @@ def load_pyannote_model(hf_token: str):
     
     logger.info(f"Chargement de Pyannote: {PYANNOTE_MODEL_ID}")
     
-    pyannote_pipeline = Pipeline.from_pretrained(
-        PYANNOTE_MODEL_ID,
-        use_auth_token=hf_token
-    )
+    # Utiliser le context manager pour le patch torch.load (PyTorch 2.6+ compat)
+    with pyannote_load_context():
+        pyannote_pipeline = Pipeline.from_pretrained(
+            PYANNOTE_MODEL_ID,
+            use_auth_token=hf_token
+        )
     
     # Appliquer les hyperparamètres personnalisés pour améliorer la qualité
     try:
@@ -1251,7 +1420,7 @@ def save_upload_file(upload_file: UploadFile) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gère le cycle de vie de l'application."""
-    global device
+    global device, PYANNOTE_DEVICE
     
     # Startup
     logger.info("=" * 60)
@@ -1261,11 +1430,34 @@ async def lifespan(app: FastAPI):
     # Détecter le device
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        if detect_rocm():
+        is_rocm = detect_rocm()
+        
+        if is_rocm:
             logger.info("🔥 ROCm GPU détecté")
+            hip_version = getattr(torch.version, 'hip', 'unknown')
+            logger.info(f"   HIP version: {hip_version}")
         else:
             logger.info("🔥 CUDA GPU détecté")
         logger.info(f"   GPU: {torch.cuda.get_device_name(0)}")
+        
+        # Configurer les backends ROCm (désactiver SDP fused)
+        if is_rocm:
+            configure_rocm_backends()
+        
+        # Exécuter le smoke test GPU pour PyAnnote (si ROCm)
+        if is_rocm and PYANNOTE_DEVICE.lower() != "cpu":
+            logger.info("🧪 Exécution du GPU Smoke Test pour PyAnnote...")
+            smoke_ok, smoke_reason = run_pyannote_gpu_smoke_test()
+            
+            if smoke_ok:
+                logger.info("✅ GPU Smoke Test réussi - PyAnnote utilisera le GPU")
+            else:
+                logger.warning(f"⚠️  GPU Smoke Test échoué: {smoke_reason}")
+                logger.warning("   PyAnnote sera forcé sur CPU (Whisper reste sur GPU)")
+                # Forcer PyAnnote sur CPU
+                PYANNOTE_DEVICE = "cpu"
+        elif PYANNOTE_DEVICE.lower() == "cpu":
+            logger.info("ℹ️  PYANNOTE_DEVICE=cpu configuré - pas de smoke test nécessaire")
     else:
         device = torch.device("cpu")
         logger.warning("⚠️  Pas de GPU disponible, utilisation du CPU")
@@ -1282,7 +1474,7 @@ async def lifespan(app: FastAPI):
         raise
     
     # Afficher la configuration Pyannote
-    logger.info(f"🎯 PYANNOTE_DEVICE={PYANNOTE_DEVICE} (device cible pour Pyannote)")
+    logger.info(f"🎯 PYANNOTE_DEVICE={PYANNOTE_DEVICE} (device effectif pour Pyannote)")
     
     # Charger Pyannote au démarrage si HF_TOKEN est défini
     if HF_TOKEN:
@@ -1336,6 +1528,9 @@ async def health_check():
         gpu_name=device_info["gpu_name"],
         memory_total_gb=device_info["memory_total_gb"],
         memory_available_gb=device_info["memory_available_gb"],
+        rocm=device_info.get("rocm", False),
+        pyannote_gpu_ok=device_info.get("pyannote_gpu_ok", False),
+        pyannote_gpu_reason=device_info.get("pyannote_gpu_reason"),
         models_loaded={
             "whisper": whisper_model is not None,
             "pyannote": pyannote_pipeline is not None
