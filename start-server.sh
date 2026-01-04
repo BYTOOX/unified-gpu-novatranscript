@@ -75,25 +75,35 @@ check_distrobox() {
 # Configurer l'environnement (créer venv, installer Python si nécessaire)
 setup_environment() {
     log_info "Configuration de l'environnement..."
+    log_info "Venv cible: $VENV_PATH"
     
-    # Vérifier/installer Python dans distrobox
-    distrobox enter "$DISTROBOX_NAME" -- bash -c "
-        if ! command -v python3 &> /dev/null; then
-            echo '[INFO] Installation de Python 3...'
-            sudo dnf install -y python3 python3-pip python3-devel
-        else
-            echo '[INFO] Python 3 déjà installé'
-        fi
-        
-        # Créer le venv s'il n'existe pas
-        if [ ! -d '$VENV_PATH' ]; then
-            echo '[INFO] Création du venv: $VENV_PATH'
-            sudo python3 -m venv '$VENV_PATH'
-            sudo chown -R \$(whoami):\$(whoami) '$VENV_PATH'
-        else
-            echo '[INFO] Venv déjà existant: $VENV_PATH'
-        fi
-    "
+    # Créer un script temporaire pour éviter les problèmes de quotes
+    local SETUP_SCRIPT=$(mktemp)
+    cat > "$SETUP_SCRIPT" << 'SETUP_EOF'
+#!/bin/bash
+VENV_PATH="$1"
+
+# Vérifier/installer Python
+if ! command -v python3 &> /dev/null; then
+    echo '[INFO] Installation de Python 3...'
+    sudo dnf install -y python3 python3-pip python3-devel
+else
+    echo '[INFO] Python 3 déjà installé:' $(python3 --version)
+fi
+
+# Créer le venv s'il n'existe pas
+if [ ! -d "$VENV_PATH" ]; then
+    echo "[INFO] Création du venv: $VENV_PATH"
+    sudo python3 -m venv "$VENV_PATH"
+    sudo chown -R $(whoami):$(whoami) "$VENV_PATH"
+else
+    echo "[INFO] Venv déjà existant: $VENV_PATH"
+fi
+SETUP_EOF
+    
+    chmod +x "$SETUP_SCRIPT"
+    distrobox enter "$DISTROBOX_NAME" -- bash "$SETUP_SCRIPT" "$VENV_PATH"
+    rm -f "$SETUP_SCRIPT"
     
     log_info "Environnement configuré"
 }
@@ -105,20 +115,11 @@ install_deps() {
     log_info "Venv: $VENV_PATH"
     
     run_in_venv "pip install --upgrade pip"
-    
-    # Installer onnxruntime-rocm AVANT silero-vad pour éviter le conflit de dépendances
-    log_info "Installation de onnxruntime-rocm (requis pour silero-vad sur AMD ROCm)..."
-    run_in_venv "pip install onnxruntime-rocm" || log_warn "onnxruntime-rocm non disponible, silero-vad sera désactivé"
-    
-    # Installer silero-vad sans ses dépendances (onnxruntime-rocm le remplace)
-    log_info "Installation de silero-vad (--no-deps pour utiliser onnxruntime-rocm)..."
-    run_in_venv "pip install --no-deps silero-vad>=5.1" || log_warn "silero-vad non installé"
-    
-    # Installer le reste des dépendances (sans silero-vad qui est déjà installé)
-    log_info "Installation des autres dépendances..."
-    run_in_venv "pip install -r $SCRIPT_DIR/requirements.txt --ignore-installed silero-vad"
+    run_in_venv "pip install -r $SCRIPT_DIR/requirements.txt"
     
     log_info "Dépendances installées avec succès"
+    log_warn "Note: silero-vad désactivé (onnxruntime non disponible sur ROCm)"
+    log_info "Le service fonctionne sans VAD (fonctionnalité optionnelle)"
 }
 
 # Démarrer le serveur

@@ -65,7 +65,7 @@ distrobox enter llama-rocm-7.1.1 -- python3 -c "import torch; print(torch.cuda.i
 # Doit afficher: True
 ```
 
-> **Note ROCm/AMD :** Le script installe automatiquement `onnxruntime-rocm` avant `silero-vad` pour éviter les conflits de dépendances avec `onnxruntime` standard qui n'est pas compatible ROCm.
+> **Note ROCm/AMD :** `silero-vad` est désactivé car `onnxruntime` n'est pas disponible sur ROCm. Le service fonctionne sans VAD (fonctionnalité optionnelle pour filtrer les silences).
 
 ## Démarrage
 
