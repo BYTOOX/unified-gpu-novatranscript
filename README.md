@@ -2,12 +2,14 @@
 
 Service unifié de **transcription** (Whisper) + **diarization** (Pyannote) optimisé pour **AMD ROCm 7.1.1** et **Strix Halo (gfx1151)**.
 
-**Nouvelles fonctionnalités v2.2 :**
-- 🔥 Installation automatique des wheels PyTorch ROCm 7.1.1
-- 🧪 GPU Smoke Test au démarrage (détection automatique des problèmes MIOpen)
-- 🔄 Fallback automatique CPU pour PyAnnote si GPU incompatible (Whisper reste GPU)
-- ⚡ Multi-threading : les endpoints `/health` et `/status` répondent même pendant un traitement
-- 📊 Status en temps réel : progression, étape en cours, segments générés
+**Nouvelles fonctionnalités v2.3 :**
+- 🔥 Installation 100% automatique (`--setup` installe tout)
+- 🛠️ Fix gfx1151 (Strix Halo) : `HSA_OVERRIDE_GFX_VERSION=11.0.0` pour MIOpen
+- 🎤 VAD (Voice Activity Detection) via `onnxruntime-migraphx` + `silero-vad`
+- 🧪 GPU Smoke Test au démarrage (détection automatique des problèmes)
+- 🔄 Fallback automatique CPU pour PyAnnote si GPU incompatible
+- ⚡ Multi-threading : `/health` et `/status` répondent pendant un traitement
+- 📊 Status en temps réel : progression, étape, segments générés
 
 ## Architecture
 
@@ -67,13 +69,21 @@ distrobox enter llama-rocm-7.1.1 -- python3 -c "import torch; print('GPU:', torc
 # Doit afficher: GPU: True | HIP: 7.1.xxxxx
 ```
 
-Le script `--install` télécharge automatiquement les wheels PyTorch depuis le repo AMD :
+Le script `--setup` installe automatiquement :
+
+**Bibliothèques ROCm système :**
+- `miopen-hip`, `hipfft`, `hiprand`, `rocblas`, `rocsolver`
+- `gcc-c++`, `libstdc++-devel` (pour compiler les kernels MIOpen)
+
+**Python (wheels ROCm 7.1.1) :**
 - `torch-2.9.1+rocm7.1.1`
 - `torchaudio-2.9.0+rocm7.1.1`
 - `torchvision-0.24.0+rocm7.1.1`
 - `triton-3.5.1+rocm7.1.1`
 
-> **Note ROCm/AMD :** `silero-vad` est maintenant supporté via `onnxruntime-migraphx` depuis ROCm 7.1.1. Le script `--setup` l'installe automatiquement.
+**VAD (Voice Activity Detection) :**
+- `onnxruntime-migraphx-1.23.1` (depuis repo.radeon.com)
+- `silero-vad`
 
 ## Démarrage
 
@@ -104,8 +114,8 @@ Retourne l'état du service. **Répond toujours**, même pendant un traitement e
   "memory_total_gb": 128.0,
   "memory_available_gb": 120.0,
   "rocm": true,
-  "pyannote_gpu_ok": false,
-  "pyannote_gpu_reason": "miopen_error: miopenStatusUnknownError",
+  "pyannote_gpu_ok": true,
+  "pyannote_gpu_reason": "all_tests_passed",
   "models_loaded": {
     "whisper": true,
     "pyannote": true
@@ -250,10 +260,12 @@ ls -la /dev/dri /dev/kfd
 groups | grep video
 ```
 
-### "miopenStatusUnknownError" ou erreurs MIOpen
-Ce problème survient sur certains GPUs AMD récents (RDNA 3.5 : Radeon 8060S, 8050S, etc.) où MIOpen ne supporte pas encore toutes les opérations.
+### "miopenStatusUnknownError" ou erreurs MIOpen (gfx1151 / Strix Halo)
+Ce problème survient sur les GPUs RDNA 4 (gfx1151 : Radeon 8060S, 8050S, etc.) car MIOpen n'a pas encore de kernels natifs pour cette architecture.
 
-**Solution :** Forcer Pyannote sur CPU :
+**Solution automatique :** Le script utilise `HSA_OVERRIDE_GFX_VERSION=11.0.0` pour émuler gfx1100 (RDNA 3), ce qui permet à MIOpen de fonctionner. Cette variable est automatiquement définie par `start-server.sh`.
+
+**Si le problème persiste**, vous pouvez forcer Pyannote sur CPU :
 ```bash
 # Dans .env
 PYANNOTE_DEVICE=cpu
