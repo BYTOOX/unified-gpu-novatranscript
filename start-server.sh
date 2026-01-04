@@ -303,9 +303,15 @@ install_deps() {
     run_in_venv "pip install --upgrade pip"
     run_in_venv "pip install -r $SCRIPT_DIR/requirements.txt"
     
+    # Installer ONNX Runtime MIGraphX pour ROCm (permet silero-vad)
+    log_step "Installation de ONNX Runtime MIGraphX pour ROCm..."
+    run_in_venv "pip install https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/onnxruntime_migraphx-1.23.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl || true"
+    
+    # Installer silero-vad maintenant que onnxruntime est disponible
+    log_step "Installation de silero-vad..."
+    run_in_venv "pip install silero-vad || true"
+    
     log_info "Dépendances installées avec succès"
-    log_warn "Note: silero-vad désactivé (onnxruntime non disponible sur ROCm)"
-    log_info "Le service fonctionne sans VAD (fonctionnalité optionnelle)"
 }
 
 # Démarrer le serveur

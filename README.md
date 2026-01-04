@@ -73,7 +73,7 @@ Le script `--install` télécharge automatiquement les wheels PyTorch depuis le 
 - `torchvision-0.24.0+rocm7.1.1`
 - `triton-3.5.1+rocm7.1.1`
 
-> **Note ROCm/AMD :** `silero-vad` est désactivé car `onnxruntime` n'est pas disponible sur ROCm. Le service fonctionne sans VAD (fonctionnalité optionnelle pour filtrer les silences).
+> **Note ROCm/AMD :** `silero-vad` est maintenant supporté via `onnxruntime-migraphx` depuis ROCm 7.1.1. Le script `--setup` l'installe automatiquement.
 
 ## Démarrage
 
