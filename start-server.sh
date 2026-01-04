@@ -105,6 +105,7 @@ echo "[INFO] Installation des bibliothèques ROCm pour PyTorch..."
 # - hipfft: FFT sur GPU (utilisé par torchaudio)
 # - hiprand: génération de nombres aléatoires
 # - rocblas/rocsolver: algèbre linéaire
+# - gcc-c++/libstdc++-devel: pour compiler les kernels MIOpen à la volée (Dropout, etc.)
 ROCM_PACKAGES=(
     "miopen-hip"
     "miopen-hip-devel"
@@ -115,6 +116,8 @@ ROCM_PACKAGES=(
     "rocm-hip-runtime-devel"
     "rocblas-devel"
     "rocsolver-devel"
+    "gcc-c++"
+    "libstdc++-devel"
 )
 
 echo "[INFO] Packages à installer: ${ROCM_PACKAGES[*]}"
