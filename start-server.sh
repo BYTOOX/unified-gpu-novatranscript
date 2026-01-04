@@ -89,6 +89,55 @@ check_distrobox() {
     fi
 }
 
+# Installer les bibliothèques ROCm système nécessaires pour PyTorch
+install_rocm_libs() {
+    log_step "Installation des bibliothèques ROCm système..."
+    
+    local ROCM_SCRIPT=$(mktemp)
+    cat > "$ROCM_SCRIPT" << 'ROCM_LIBS_EOF'
+#!/bin/bash
+set -e
+
+echo "[INFO] Installation des bibliothèques ROCm pour PyTorch..."
+
+# Packages ROCm nécessaires pour PyTorch + PyAnnote
+# - miopen-hip: kernels deep learning (BatchNorm, Conv, etc.)
+# - hipfft: FFT sur GPU (utilisé par torchaudio)
+# - hiprand: génération de nombres aléatoires
+# - rocblas/rocsolver: algèbre linéaire
+ROCM_PACKAGES=(
+    "miopen-hip"
+    "miopen-hip-devel"
+    "hipfft"
+    "hipfft-devel"
+    "hiprand"
+    "hiprand-devel"
+    "rocm-hip-runtime-devel"
+    "rocblas-devel"
+    "rocsolver-devel"
+)
+
+echo "[INFO] Packages à installer: ${ROCM_PACKAGES[*]}"
+
+# Installer les packages (ignore les erreurs si déjà installés)
+sudo dnf install -y "${ROCM_PACKAGES[@]}" || {
+    echo "[WARN] Certains packages n'ont pas pu être installés"
+    echo "[INFO] Tentative d'installation un par un..."
+    for pkg in "${ROCM_PACKAGES[@]}"; do
+        sudo dnf install -y "$pkg" 2>/dev/null || echo "[WARN] $pkg non disponible, ignoré"
+    done
+}
+
+echo "[OK] Bibliothèques ROCm installées"
+ROCM_LIBS_EOF
+    
+    chmod +x "$ROCM_SCRIPT"
+    distrobox enter "$DISTROBOX_NAME" -- bash "$ROCM_SCRIPT"
+    rm -f "$ROCM_SCRIPT"
+    
+    log_info "Bibliothèques ROCm installées"
+}
+
 # Configurer l'environnement (créer venv avec Python 3.12)
 setup_environment() {
     log_info "Configuration de l'environnement..."
@@ -317,6 +366,7 @@ main() {
     case "${1:-}" in
         --setup)
             check_distrobox
+            install_rocm_libs
             setup_environment
             install_deps
             ;;
@@ -335,8 +385,8 @@ main() {
             echo "Usage: $0 [--setup|--install|--background|--stop|--help]"
             echo ""
             echo "Options:"
-            echo "  --setup       Configuration complète (créer venv + installer PyTorch ROCm + deps)"
-            echo "  --install     Installer les dépendances (PyTorch ROCm + requirements.txt)"
+            echo "  --setup       Configuration complète (libs ROCm + venv + PyTorch ROCm + deps)"
+            echo "  --install     Installer les dépendances Python (PyTorch ROCm + requirements.txt)"
             echo "  --background  Démarrer le serveur en arrière-plan"
             echo "  --stop        Arrêter le serveur en arrière-plan"
             echo "  --help        Afficher cette aide"
