@@ -1,11 +1,12 @@
 #!/bin/bash
 #
 # Script de démarrage du service Remote Processing
-# Utilise distrobox avec le conteneur ROCm pour accéder au GPU AMD
+# Optimisé pour AMD Strix Halo (gfx1151) avec ROCm 7.1.1
 #
 # Usage:
 #   ./start-server.sh              # Mode normal
 #   ./start-server.sh --background # Mode background (nohup)
+#   ./start-server.sh --setup      # Configuration complète (venv + deps)
 #   ./start-server.sh --install    # Installer les dépendances seulement
 #
 
@@ -18,6 +19,17 @@ HOST="0.0.0.0"
 PORT="${PORT:-8000}"
 LOG_FILE="${SCRIPT_DIR}/server.log"
 
+# Configuration ROCm 7.1.1
+VENV_PATH="/opt/whisper-venv"
+ROCM_LIB_PATH="/opt/rocm-7.1.1/lib"
+ROCM_WHEELS_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1"
+
+# Wheels PyTorch ROCm 7.1.1 pour Python 3.12
+TORCH_WHEEL="torch-2.9.1%2Brocm7.1.1.lw.git351ff442-cp312-cp312-linux_x86_64.whl"
+TORCHVISION_WHEEL="torchvision-0.24.0%2Brocm7.1.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl"
+TORCHAUDIO_WHEEL="torchaudio-2.9.0%2Brocm7.1.1.gite3c6ee2b-cp312-cp312-linux_x86_64.whl"
+TRITON_WHEEL="triton-3.5.1%2Brocm7.1.1.gita272dfa8-cp312-cp312-linux_x86_64.whl"
+
 # Charger les variables depuis .env si le fichier existe
 ENV_FILE="${SCRIPT_DIR}/.env"
 if [ -f "$ENV_FILE" ]; then
@@ -28,10 +40,6 @@ fi
 
 HF_TOKEN="${HF_TOKEN:-}"
 
-# Configuration ROCm 7.1.1 et venv Python 3.12
-VENV_PATH="/opt/whisper-venv"
-ROCM_LIB_PATH="/opt/rocm-7.1.1/lib"
-
 # Commande pour activer l'environnement dans distrobox
 run_in_venv() {
     distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && export HF_TOKEN='$HF_TOKEN' && $*"
@@ -41,6 +49,7 @@ run_in_venv() {
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 log_info() {
@@ -53,6 +62,10 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+log_step() {
+    echo -e "${BLUE}[STEP]${NC} $1"
 }
 
 # Vérifier que distrobox existe
@@ -72,48 +85,150 @@ check_distrobox() {
     fi
 }
 
-# Configurer l'environnement (créer venv, installer Python si nécessaire)
+# Configurer l'environnement (créer venv avec Python 3.12)
 setup_environment() {
     log_info "Configuration de l'environnement..."
     log_info "Venv cible: $VENV_PATH"
+    log_info "Python requis: 3.12 (pour compatibilité wheels ROCm)"
     
     # Créer un script temporaire pour éviter les problèmes de quotes
     local SETUP_SCRIPT=$(mktemp)
     cat > "$SETUP_SCRIPT" << 'SETUP_EOF'
 #!/bin/bash
+set -e
 VENV_PATH="$1"
 
-# Vérifier/installer Python
-if ! command -v python3 &> /dev/null; then
-    echo '[INFO] Installation de Python 3...'
-    sudo dnf install -y python3 python3-pip python3-devel
-else
-    echo '[INFO] Python 3 déjà installé:' $(python3 --version)
+echo "[INFO] Vérification de Python 3.12..."
+
+# Sur Fedora, installer python3.12 spécifiquement
+if ! command -v python3.12 &> /dev/null; then
+    echo "[INFO] Installation de Python 3.12..."
+    sudo dnf install -y python3.12 python3.12-pip python3.12-devel
 fi
 
-# Créer le venv s'il n'existe pas
+# Vérifier que python3.12 est disponible
+if ! command -v python3.12 &> /dev/null; then
+    echo "[ERROR] Python 3.12 non disponible après installation"
+    echo "[ERROR] Les wheels PyTorch ROCm nécessitent Python 3.12"
+    exit 1
+fi
+
+echo "[INFO] Python 3.12 trouvé: $(python3.12 --version)"
+
+# Supprimer le venv existant s'il utilise une mauvaise version de Python
+if [ -d "$VENV_PATH" ]; then
+    VENV_PYTHON_VERSION=$("$VENV_PATH/bin/python3" --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1 || echo "unknown")
+    if [ "$VENV_PYTHON_VERSION" != "3.12" ]; then
+        echo "[WARN] Venv existant utilise Python $VENV_PYTHON_VERSION, suppression..."
+        sudo rm -rf "$VENV_PATH"
+    fi
+fi
+
+# Créer le venv avec Python 3.12
 if [ ! -d "$VENV_PATH" ]; then
-    echo "[INFO] Création du venv: $VENV_PATH"
-    sudo python3 -m venv "$VENV_PATH"
+    echo "[INFO] Création du venv avec Python 3.12: $VENV_PATH"
+    sudo python3.12 -m venv "$VENV_PATH"
     sudo chown -R $(whoami):$(whoami) "$VENV_PATH"
 else
-    echo "[INFO] Venv déjà existant: $VENV_PATH"
+    echo "[INFO] Venv Python 3.12 déjà existant: $VENV_PATH"
 fi
+
+# Vérifier la version dans le venv
+VENV_VERSION=$("$VENV_PATH/bin/python3" --version)
+echo "[INFO] Version Python dans le venv: $VENV_VERSION"
 SETUP_EOF
     
     chmod +x "$SETUP_SCRIPT"
     distrobox enter "$DISTROBOX_NAME" -- bash "$SETUP_SCRIPT" "$VENV_PATH"
     rm -f "$SETUP_SCRIPT"
     
-    log_info "Environnement configuré"
+    log_info "Environnement configuré avec Python 3.12"
 }
 
-# Installer les dépendances
+# Installer les wheels PyTorch ROCm 7.1.1
+install_rocm_pytorch() {
+    log_step "Installation de PyTorch ROCm 7.1.1 pour Strix Halo..."
+    
+    # Créer un script d'installation
+    local INSTALL_SCRIPT=$(mktemp)
+    cat > "$INSTALL_SCRIPT" << ROCM_EOF
+#!/bin/bash
+set -e
+
+VENV_PATH="$VENV_PATH"
+ROCM_WHEELS_URL="$ROCM_WHEELS_URL"
+TORCH_WHEEL="$TORCH_WHEEL"
+TORCHVISION_WHEEL="$TORCHVISION_WHEEL"
+TORCHAUDIO_WHEEL="$TORCHAUDIO_WHEEL"
+TRITON_WHEEL="$TRITON_WHEEL"
+
+source "\$VENV_PATH/bin/activate"
+
+# Vérifier si PyTorch ROCm est déjà installé
+TORCH_VERSION=\$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "")
+if [[ "\$TORCH_VERSION" == *"rocm"* ]]; then
+    echo "[INFO] PyTorch ROCm déjà installé: \$TORCH_VERSION"
+    # Vérifier que le GPU est détecté
+    GPU_OK=\$(python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
+    if [ "\$GPU_OK" = "True" ]; then
+        echo "[INFO] GPU ROCm détecté correctement"
+        exit 0
+    else
+        echo "[WARN] GPU non détecté, réinstallation des wheels..."
+    fi
+fi
+
+# Supprimer les anciennes versions (CUDA ou ROCm corrompue)
+echo "[INFO] Suppression des anciennes versions de PyTorch..."
+pip uninstall -y torch torchvision torchaudio triton 2>/dev/null || true
+
+# Supprimer les packages nvidia si présents
+pip uninstall -y nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 \
+    nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-cufile-cu12 \
+    nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-cusparselt-cu12 \
+    nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvshmem-cu12 nvidia-nvtx-cu12 2>/dev/null || true
+
+# Télécharger les wheels ROCm
+WHEEL_DIR="/tmp/rocm-wheels"
+mkdir -p "\$WHEEL_DIR"
+cd "\$WHEEL_DIR"
+
+echo "[INFO] Téléchargement des wheels PyTorch ROCm 7.1.1..."
+wget -nc -q --show-progress "\${ROCM_WHEELS_URL}/\${TRITON_WHEEL}" || true
+wget -nc -q --show-progress "\${ROCM_WHEELS_URL}/\${TORCH_WHEEL}" || true
+wget -nc -q --show-progress "\${ROCM_WHEELS_URL}/\${TORCHVISION_WHEEL}" || true
+wget -nc -q --show-progress "\${ROCM_WHEELS_URL}/\${TORCHAUDIO_WHEEL}" || true
+
+# Installer les wheels (ordre important: triton d'abord)
+echo "[INFO] Installation des wheels..."
+pip install "\${TRITON_WHEEL//%2B/+}"
+pip install "\${TORCH_WHEEL//%2B/+}"
+pip install "\${TORCHVISION_WHEEL//%2B/+}"
+pip install "\${TORCHAUDIO_WHEEL//%2B/+}"
+
+# Vérification
+echo "[INFO] Vérification de l'installation..."
+python3 -c "import torch; print('PyTorch:', torch.__version__); print('HIP:', torch.version.hip); print('GPU:', torch.cuda.is_available())"
+
+echo "[OK] PyTorch ROCm 7.1.1 installé avec succès"
+ROCM_EOF
+    
+    chmod +x "$INSTALL_SCRIPT"
+    distrobox enter "$DISTROBOX_NAME" -- bash "$INSTALL_SCRIPT"
+    rm -f "$INSTALL_SCRIPT"
+}
+
+# Installer les dépendances Python
 install_deps() {
-    log_info "Installation des dépendances Python dans le venv..."
+    log_info "Installation des dépendances Python..."
     log_info "Dossier: $SCRIPT_DIR"
     log_info "Venv: $VENV_PATH"
     
+    # D'abord installer PyTorch ROCm
+    install_rocm_pytorch
+    
+    # Ensuite installer les autres dépendances
+    log_step "Installation des dépendances requirements.txt..."
     run_in_venv "pip install --upgrade pip"
     run_in_venv "pip install -r $SCRIPT_DIR/requirements.txt"
     
@@ -136,7 +251,7 @@ start_server() {
     
     # Vérifier l'accès GPU
     log_info "Vérification GPU..."
-    run_in_venv 'python -c "import torch; print(\"GPU:\", torch.cuda.is_available()); print(\"HIP:\", torch.version.hip)"' || true
+    run_in_venv 'python3 -c "import torch; print(\"GPU:\", torch.cuda.is_available(), \"| HIP:\", torch.version.hip)"' || true
     
     # Lancer uvicorn
     cd "$SCRIPT_DIR"
@@ -201,8 +316,8 @@ main() {
             echo "Usage: $0 [--setup|--install|--background|--stop|--help]"
             echo ""
             echo "Options:"
-            echo "  --setup       Configurer l'environnement (créer venv, installer Python) + dépendances"
-            echo "  --install     Installer les dépendances Python (venv doit exister)"
+            echo "  --setup       Configuration complète (créer venv + installer PyTorch ROCm + deps)"
+            echo "  --install     Installer les dépendances (PyTorch ROCm + requirements.txt)"
             echo "  --background  Démarrer le serveur en arrière-plan"
             echo "  --stop        Arrêter le serveur en arrière-plan"
             echo "  --help        Afficher cette aide"
@@ -210,6 +325,11 @@ main() {
             echo "Variables d'environnement:"
             echo "  PORT          Port du serveur (défaut: 8000)"
             echo "  HF_TOKEN      Token Hugging Face pour charger Pyannote au démarrage"
+            echo ""
+            echo "Configuration GPU:"
+            echo "  Ce script est optimisé pour AMD Strix Halo (gfx1151) avec ROCm 7.1.1"
+            echo "  Les wheels PyTorch sont téléchargés automatiquement depuis:"
+            echo "  $ROCM_WHEELS_URL"
             ;;
         *)
             check_distrobox

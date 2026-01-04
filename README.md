@@ -1,11 +1,13 @@
 # Remote Processing Service
 
-Service unifié de **transcription** (Whisper) + **diarization** (Pyannote) optimisé pour **AMD ROCm**.
+Service unifié de **transcription** (Whisper) + **diarization** (Pyannote) optimisé pour **AMD ROCm 7.1.1** et **Strix Halo (gfx1151)**.
 
-**Nouvelles fonctionnalités v2.1 :**
+**Nouvelles fonctionnalités v2.2 :**
+- 🔥 Installation automatique des wheels PyTorch ROCm 7.1.1
+- 🧪 GPU Smoke Test au démarrage (détection automatique des problèmes MIOpen)
+- 🔄 Fallback automatique CPU pour PyAnnote si GPU incompatible (Whisper reste GPU)
 - ⚡ Multi-threading : les endpoints `/health` et `/status` répondent même pendant un traitement
 - 📊 Status en temps réel : progression, étape en cours, segments générés
-- 🔒 Protection contre les requêtes simultanées (503 si déjà occupé)
 
 ## Architecture
 
@@ -54,16 +56,22 @@ distrobox create -n llama-rocm-7.1.1 \
 ## Installation
 
 ```bash
-# 1. Configuration complète (crée le venv, installe Python si nécessaire, installe les dépendances)
+# 1. Configuration complète (crée le venv, installe PyTorch ROCm 7.1.1, installe les dépendances)
 ./start-server.sh --setup
 
 # OU si le venv existe déjà :
 ./start-server.sh --install
 
 # 2. Vérifier l'accès GPU
-distrobox enter llama-rocm-7.1.1 -- python3 -c "import torch; print(torch.cuda.is_available())"
-# Doit afficher: True
+distrobox enter llama-rocm-7.1.1 -- python3 -c "import torch; print('GPU:', torch.cuda.is_available(), '| HIP:', torch.version.hip)"
+# Doit afficher: GPU: True | HIP: 7.1.xxxxx
 ```
+
+Le script `--install` télécharge automatiquement les wheels PyTorch depuis le repo AMD :
+- `torch-2.9.1+rocm7.1.1`
+- `torchaudio-2.9.0+rocm7.1.1`
+- `torchvision-0.24.0+rocm7.1.1`
+- `triton-3.5.1+rocm7.1.1`
 
 > **Note ROCm/AMD :** `silero-vad` est désactivé car `onnxruntime` n'est pas disponible sur ROCm. Le service fonctionne sans VAD (fonctionnalité optionnelle pour filtrer les silences).
 
@@ -95,6 +103,9 @@ Retourne l'état du service. **Répond toujours**, même pendant un traitement e
   "gpu_name": "AMD Radeon RX 8060S",
   "memory_total_gb": 128.0,
   "memory_available_gb": 120.0,
+  "rocm": true,
+  "pyannote_gpu_ok": false,
+  "pyannote_gpu_reason": "miopen_error: miopenStatusUnknownError",
   "models_loaded": {
     "whisper": true,
     "pyannote": true
