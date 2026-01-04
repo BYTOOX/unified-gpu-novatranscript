@@ -24,6 +24,10 @@ VENV_PATH="/opt/whisper-venv"
 ROCM_LIB_PATH="/opt/rocm-7.1.1/lib"
 ROCM_WHEELS_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1"
 
+# Fix pour gfx1151 (Strix Halo) - émule gfx1100 pour les kernels MIOpen
+# Sans cette variable, MIOpen échoue avec "row_bcast:15 not a valid operand"
+HSA_OVERRIDE_GFX_VERSION="11.0.0"
+
 # Wheels PyTorch ROCm 7.1.1 pour Python 3.12
 TORCH_WHEEL="torch-2.9.1%2Brocm7.1.1.lw.git351ff442-cp312-cp312-linux_x86_64.whl"
 TORCHVISION_WHEEL="torchvision-0.24.0%2Brocm7.1.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl"
@@ -42,7 +46,7 @@ HF_TOKEN="${HF_TOKEN:-}"
 
 # Commande pour activer l'environnement dans distrobox
 run_in_venv() {
-    distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && export HF_TOKEN='$HF_TOKEN' && $*"
+    distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && export HSA_OVERRIDE_GFX_VERSION=$HSA_OVERRIDE_GFX_VERSION && export HF_TOKEN='$HF_TOKEN' && $*"
 }
 
 # Couleurs pour les logs
@@ -174,6 +178,8 @@ TRITON_WHEEL="$TRITON_WHEEL"
 
 # Configurer LD_LIBRARY_PATH pour ROCm
 export LD_LIBRARY_PATH="\$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-}"
+# Fix gfx1151 (Strix Halo) - émule gfx1100 pour MIOpen
+export HSA_OVERRIDE_GFX_VERSION="11.0.0"
 
 source "\$VENV_PATH/bin/activate"
 
@@ -278,7 +284,7 @@ start_background() {
     log_info "ROCm: $ROCM_LIB_PATH"
     
     cd "$SCRIPT_DIR"
-    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && export HF_TOKEN='$HF_TOKEN' && cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
+    nohup distrobox enter "$DISTROBOX_NAME" -- bash -c "source $VENV_PATH/bin/activate && export LD_LIBRARY_PATH=$ROCM_LIB_PATH:\${LD_LIBRARY_PATH:-} && export HSA_OVERRIDE_GFX_VERSION=$HSA_OVERRIDE_GFX_VERSION && export HF_TOKEN='$HF_TOKEN' && cd $SCRIPT_DIR && uvicorn server:app --host $HOST --port $PORT" > "$LOG_FILE" 2>&1 &
     
     PID=$!
     echo $PID > "${SCRIPT_DIR}/server.pid"
@@ -341,6 +347,8 @@ main() {
             echo ""
             echo "Configuration GPU:"
             echo "  Ce script est optimisé pour AMD Strix Halo (gfx1151) avec ROCm 7.1.1"
+            echo "  HSA_OVERRIDE_GFX_VERSION=11.0.0 est utilisé pour émuler gfx1100"
+            echo "  (corrige les erreurs MIOpen 'row_bcast not a valid operand')"
             echo "  Les wheels PyTorch sont téléchargés automatiquement depuis:"
             echo "  $ROCM_WHEELS_URL"
             ;;
