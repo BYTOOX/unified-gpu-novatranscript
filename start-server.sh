@@ -103,7 +103,16 @@ echo "[INFO] Vérification de Python 3.12..."
 # Sur Fedora, installer python3.12 spécifiquement
 if ! command -v python3.12 &> /dev/null; then
     echo "[INFO] Installation de Python 3.12..."
-    sudo dnf install -y python3.12 python3.12-pip python3.12-devel
+    # Sur Fedora: python3.12 inclut pip, -devel pour compiler les extensions
+    sudo dnf install -y python3.12 python3.12-devel || {
+        # Fallback si le package exact n'existe pas
+        echo "[WARN] python3.12 non trouvé, tentative avec python312..."
+        sudo dnf install -y python312 python312-devel || {
+            echo "[ERROR] Impossible d'installer Python 3.12"
+            echo "[INFO] Essayez: sudo dnf install python3.12"
+            exit 1
+        }
+    }
 fi
 
 # Vérifier que python3.12 est disponible
